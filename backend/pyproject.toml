@@ -1,0 +1,25 @@
+[project]
+name = "agent-hub-backend"
+version = "0.1.0"
+description = "智能体运营中心 Web 看板系统 - 后端（FastAPI + SQLite）"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi==0.111.0",
+    "uvicorn[standard]==0.30.1",
+    "SQLAlchemy==2.0.30",
+    "pydantic==2.7.1",
+    "pydantic-settings==2.3.1",
+    "python-jose[cryptography]==3.3.0",
+    "passlib[bcrypt]==1.7.4",
+    "bcrypt==4.0.1",
+    "cryptography==42.0.8",
+    "python-multipart==0.0.9",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
