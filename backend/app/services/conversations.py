@@ -3,15 +3,37 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+import time
+from datetime import datetime
+from typing import Any, Callable, Optional
 
 from .. import models
+from ..config import settings
 from ..models import Project
 from ..providers import mock
 from ..providers.base import ConversationItem
 from ..providers.registry import build_provider
 from ..repositories.base import ConversationRepository
 from ..security import decrypt_secret
+
+# 进度回调签名：(已处理应用数, 应用总数, 累计拉取条数) -> None
+ProgressCallback = Callable[[int, int, int], None]
+
+
+def min_sync_interval_seconds() -> int:
+    """手动对话同步的最小间隔（秒），0 表示不限制。可经环境变量配置。"""
+    return settings.conv_sync_min_interval_seconds
+
+
+def seconds_until_next_sync(project: Project, now: datetime | None = None) -> int:
+    """返回距离允许下次同步还需等待的秒数；0 表示当前允许同步。"""
+    interval = min_sync_interval_seconds()
+    last = project.last_conv_synced_at
+    if interval <= 0 or last is None:
+        return 0
+    now = now or datetime.utcnow()
+    remain = interval - (now - last).total_seconds()
+    return int(remain) + 1 if remain > 0 else 0
 
 
 def _collect_apps(spaces) -> list[tuple[str, str]]:
@@ -28,6 +50,8 @@ def _collect_apps(spaces) -> list[tuple[str, str]]:
 
 
 def _to_record(project_id: int, app_biz_id: str, item: ConversationItem) -> models.ConversationRecord:
+    # raw 默认不落库以节省存储；可经 CONV_STORE_RAW 开启用于排障
+    raw = json.dumps(item.raw, ensure_ascii=False) if (settings.conv_store_raw and item.raw) else ""
     return models.ConversationRecord(
         project_id=project_id,
         app_biz_id=app_biz_id,
@@ -39,7 +63,7 @@ def _to_record(project_id: int, app_biz_id: str, item: ConversationItem) -> mode
         answer=item.answer,
         intent_category=item.intent_category,
         msg_create_time=item.create_time,
-        raw=json.dumps(item.raw, ensure_ascii=False) if item.raw else "",
+        raw=raw,
     )
 
 
@@ -49,12 +73,26 @@ def sync_conversations(
     begin: str,
     end: str,
     max_records_per_app: int = 500,
+    incremental: bool = True,
+    progress_cb: Optional[ProgressCallback] = None,
 ) -> dict[str, Any]:
     """同步项目下所有应用的对话记录。
 
-    返回汇总：{source, app_count, fetched, inserted}。
+    incremental=True（默认）：以已入库的最大 msg_create_time 作为本次起点（不早于传入
+        begin），只拉新增量，显著降低单次同步的拉取量与去重内存占用。
+    incremental=False：按传入 begin 全量回补。
+    progress_cb：可选进度回调，每处理完一个应用回报 (已完成, 总数, 累计拉取)。
+
+    返回汇总：{source, app_count, fetched, inserted, begin, incremental}。
     任意环节失败安全回退 Mock，保证开箱可用。
     """
+    # 计算本次有效起点：增量模式下取 max(传入 begin, 已入库水位线)
+    effective_begin = begin
+    if incremental:
+        watermark = conv_repo.latest_msg_create_time(project.id)
+        if watermark and watermark > begin:
+            effective_begin = watermark
+
     force_mock = not project.is_active
     client = None
     source = "live"
@@ -82,17 +120,26 @@ def sync_conversations(
         spaces = mock.mock_spaces()
 
     apps = _collect_apps(spaces)
+    total = len(apps)
+    # 应用间限速：仅实时拉取时生效，避免触发云端 QPS 限制
+    delay = settings.conv_sync_app_delay_ms / 1000.0 if source == "live" else 0.0
 
-    # 项目级去重：一次性取出已入库的 record_id
-    existing = conv_repo.existing_record_ids(project.id)
+    # 项目级去重：增量模式仅取水位线之后的 record_id，降低内存占用
+    existing = conv_repo.existing_record_ids(
+        project.id, since=effective_begin if incremental else None
+    )
     fetched = 0
     new_records: list[models.ConversationRecord] = []
     seen_in_batch: set[str] = set()
 
-    for app_biz_id, app_name in apps:
+    for idx, (app_biz_id, app_name) in enumerate(apps):
+        if delay and idx > 0:
+            time.sleep(delay)
         try:
             if source == "live" and client is not None:
-                items = client.fetch_conversations(app_biz_id, begin, end, max_records_per_app)
+                items = client.fetch_conversations(
+                    app_biz_id, effective_begin, end, max_records_per_app
+                )
             else:
                 items = mock.mock_conversations(app_biz_id, app_name)
         except Exception:  # noqa: BLE001 - 单个应用失败不影响其它应用
@@ -104,11 +151,17 @@ def sync_conversations(
                 continue
             seen_in_batch.add(rid)
             new_records.append(_to_record(project.id, app_biz_id, item))
+        if progress_cb is not None:
+            progress_cb(idx + 1, total, fetched)
 
     inserted = conv_repo.bulk_insert(new_records)
+    # 更新同步水位时间（由调用方负责持久化 project），用于限频与下次增量
+    project.last_conv_synced_at = datetime.utcnow()
     return {
         "source": source,
-        "app_count": len(apps),
+        "app_count": total,
         "fetched": fetched,
         "inserted": inserted,
+        "begin": effective_begin,
+        "incremental": incremental,
     }

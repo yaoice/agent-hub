@@ -22,10 +22,15 @@
           刷新
         </a-button>
         <template v-if="canManage">
-          <a-button type="primary" :loading="syncing" @click="onSync">
+          <a-dropdown-button type="primary" :loading="syncing" @click="onSync(false)">
             <template #icon><CloudSyncOutlined /></template>
-            同步对话
-          </a-button>
+            {{ syncing ? '同步中…' : '同步对话' }}
+            <template #overlay>
+              <a-menu @click="onSync(true)">
+                <a-menu-item key="full" :disabled="syncing">全量回补</a-menu-item>
+              </a-menu>
+            </template>
+          </a-dropdown-button>
           <a-button :disabled="!records.length" @click="onExport">
             <template #icon><DownloadOutlined /></template>
             导出 CSV
@@ -33,6 +38,26 @@
         </template>
       </div>
     </div>
+
+    <!-- 同步进度 -->
+    <a-alert
+      v-if="syncJob && (syncing || syncJob.status === 'failed')"
+      class="sync-progress"
+      :type="syncJob.status === 'failed' ? 'error' : 'info'"
+      show-icon
+    >
+      <template #message>
+        <template v-if="syncJob.status === 'failed'">
+          同步失败：{{ syncJob.error || '未知错误' }}
+        </template>
+        <template v-else>
+          {{ syncJob.incremental ? '增量' : '全量' }}同步中：已处理
+          {{ syncJob.app_done }}/{{ syncJob.app_total || '?' }} 个应用，累计拉取
+          {{ syncJob.fetched }} 条
+          <a-progress :percent="syncPercent" status="active" size="small" />
+        </template>
+      </template>
+    </a-alert>
 
     <template v-if="projects.length">
       <!-- 过滤区 -->
@@ -152,7 +177,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import dayjs, { type Dayjs } from 'dayjs'
@@ -162,7 +187,7 @@ import {
   DownloadOutlined,
 } from '@ant-design/icons-vue'
 import { conversationApi } from '@/api'
-import type { ConversationItem, ConversationQuery, ProjectBrief } from '@/types'
+import type { ConversationItem, ConversationQuery, ProjectBrief, SyncJob } from '@/types'
 import ConversationStatsPanel from '@/components/ConversationStatsPanel.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectStore } from '@/stores/project'
@@ -174,6 +199,8 @@ const router = useRouter()
 
 const loading = ref(false)
 const syncing = ref(false)
+const syncJob = ref<SyncJob | null>(null)
+let pollTimer: number | undefined
 const projects = ref<ProjectBrief[]>([])
 const projectId = ref<number>()
 const records = ref<ConversationItem[]>([])
@@ -218,6 +245,13 @@ const canManage = computed(() => {
 const hasActiveFilter = computed(
   () => !!(filters.app_biz_id || filters.intent || filters.keyword || dateRange.value),
 )
+
+// 同步进度百分比（按已处理应用数估算）
+const syncPercent = computed(() => {
+  const j = syncJob.value
+  if (!j || !j.app_total) return 0
+  return Math.min(100, Math.round((j.app_done / j.app_total) * 100))
+})
 
 const columns = [
   { title: '时间', dataIndex: 'create_time', key: 'create_time', width: 170 },
@@ -314,6 +348,7 @@ function onSwitchProject() {
   filters.app_biz_id = undefined
   loadApps()
   load()
+  resumeLatestJob()
 }
 
 function openDetail(record: ConversationItem) {
@@ -321,18 +356,76 @@ function openDetail(record: ConversationItem) {
   detailVisible.value = true
 }
 
-async function onSync() {
-  if (!projectId.value) return
-  syncing.value = true
-  try {
-    const res = await conversationApi.sync(projectId.value)
-    message.success(res.message || '同步完成')
+function stopPoll() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = undefined
+  }
+}
+
+async function onSyncJobDone(job: SyncJob) {
+  stopPoll()
+  syncing.value = false
+  if (job.status === 'success') {
+    message.success(job.message || '同步完成')
     await loadApps()
     await load()
+    if (statsActiveKey.value.includes('stats')) statsPanelRef.value?.reload()
+  } else if (job.status === 'failed') {
+    message.error(job.error || '同步失败')
+  }
+}
+
+async function pollJob(jobId: number) {
+  const pid = projectId.value
+  if (!pid) return
+  const tick = async () => {
+    try {
+      const job = await conversationApi.getSyncJob(pid, jobId)
+      syncJob.value = job
+      if (job.status === 'success' || job.status === 'failed') {
+        await onSyncJobDone(job)
+      }
+    } catch {
+      stopPoll()
+      syncing.value = false
+    }
+  }
+  await tick()
+  if (syncing.value && !pollTimer) {
+    pollTimer = window.setInterval(tick, 1500)
+  }
+}
+
+async function onSync(full = false) {
+  if (!projectId.value || syncing.value) return
+  syncing.value = true
+  syncJob.value = null
+  try {
+    const job = await conversationApi.startSyncJob(projectId.value, { full })
+    syncJob.value = job
+    await pollJob(job.id)
   } catch {
-    // 全局拦截器已提示错误
-  } finally {
+    // 429（限频）/409（已有任务进行中）等由全局拦截器提示
     syncing.value = false
+  }
+}
+
+// 进入页面或切换项目时，恢复仍在进行中的同步任务进度
+async function resumeLatestJob() {
+  stopPoll()
+  syncJob.value = null
+  syncing.value = false
+  if (!projectId.value || !canManage.value) return
+  try {
+    const job = await conversationApi.latestSyncJob(projectId.value)
+    if (job && (job.status === 'pending' || job.status === 'running')) {
+      syncJob.value = job
+      syncing.value = true
+      await pollJob(job.id)
+    }
+  } catch {
+    /* 忽略恢复失败 */
   }
 }
 
@@ -382,11 +475,16 @@ onMounted(async () => {
   projectStore.setCurrent(projectId.value)
 
   await Promise.all([loadApps(), load()])
+  resumeLatestJob()
 
   // 清理 URL query，避免刷新后过滤被反复带入
   if (route.query.app_biz_id) {
     router.replace({ query: {} })
   }
+})
+
+onUnmounted(() => {
+  stopPoll()
 })
 </script>
 
@@ -414,6 +512,10 @@ onMounted(async () => {
   color: #8a909d;
 }
 .block {
+  margin-bottom: 18px;
+  border-radius: 12px;
+}
+.sync-progress {
   margin-bottom: 18px;
   border-radius: 12px;
 }

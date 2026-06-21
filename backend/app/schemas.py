@@ -166,6 +166,8 @@ class SyncRequest(BaseModel):
     conv_begin: Optional[str] = None
     conv_end: Optional[str] = None
     max_records_per_app: int = Field(default=500, ge=1, le=5000)
+    # 全量回补：True 时忽略增量水位，按 conv_begin 起点全量拉取
+    full: bool = False
 
 
 class SyncResult(BaseModel):
@@ -183,6 +185,8 @@ class ConversationSyncRequest(BaseModel):
     begin: Optional[str] = None
     end: Optional[str] = None
     max_records_per_app: int = Field(default=500, ge=1, le=5000)
+    # 全量回补：True 时忽略增量水位，按 begin 起点全量拉取
+    full: bool = False
 
 
 class ConversationSyncResult(BaseModel):
@@ -192,6 +196,29 @@ class ConversationSyncResult(BaseModel):
     inserted: int
     message: str
     synced_at: datetime
+
+
+class SyncJobOut(BaseModel):
+    """异步同步任务状态，供前端轮询展示进度。"""
+
+    id: int
+    project_id: int
+    scope: str
+    status: str  # pending / running / success / failed
+    incremental: bool
+    app_total: int
+    app_done: int
+    fetched: int
+    inserted: int
+    source: str
+    message: str
+    error: str
+    created_at: datetime
+    updated_at: datetime
+    finished_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
 
 
 class ConversationOut(BaseModel):

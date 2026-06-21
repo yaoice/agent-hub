@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """项目管理路由：项目 CRUD、成员管理、手动同步。"""
 from datetime import datetime, timedelta
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -19,6 +20,7 @@ from ..repositories import (
     get_project_member_repository,
     get_project_repository,
     get_provider_repository,
+    get_sync_job_repository,
     get_user_repository,
 )
 from ..schemas import (
@@ -32,6 +34,7 @@ from ..schemas import (
     ProjectMemberOut,
     ProjectOut,
     ProjectUpdate,
+    SyncJobOut,
     SyncRequest,
     SyncResult,
     TrendPoint,
@@ -40,6 +43,9 @@ from ..security import decrypt_secret, encrypt_secret, mask_secret
 from ..services import (
     SCOPE_APP_COUNT,
     SCOPE_TOKEN,
+    min_sync_interval_seconds,
+    run_conversation_sync_job,
+    seconds_until_next_sync,
     sync_conversations,
     sync_dashboard,
 )
@@ -47,6 +53,19 @@ from ..services import (
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 VALID_PROJECT_ROLES = {"project_admin", "member"}
+
+
+def _guard_conv_sync_rate(project: Project) -> None:
+    """对话同步最小间隔限频：过于频繁时拒绝，避免重复全量拉取拖垮性能。"""
+    wait = seconds_until_next_sync(project)
+    if wait > 0:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"对话同步过于频繁，请 {wait} 秒后再试"
+                f"（最小间隔 {min_sync_interval_seconds() // 60} 分钟）"
+            ),
+        )
 
 
 def _to_out(db: Session, p: Project) -> ProjectOut:
@@ -255,6 +274,7 @@ def sync(
 
     # 对话记录部分
     if SCOPE_CONVERSATIONS in scopes:
+        _guard_conv_sync_rate(project)
         now = datetime.now()
         begin = body.conv_begin or (now - timedelta(days=7)).strftime("%Y-%m-%d 00:00:00")
         end = body.conv_end or now.strftime("%Y-%m-%d %H:%M:%S")
@@ -264,11 +284,14 @@ def sync(
             begin=begin,
             end=end,
             max_records_per_app=body.max_records_per_app,
+            incremental=not body.full,
         )
+        get_project_repository(db).save(project)  # 持久化同步水位时间
         sources.append(conv["source"])
         details["conversations"] = conv
+        mode = "全量" if body.full else "增量"
         msg_parts.append(
-            f"应用对话记录：{conv['app_count']} 个应用拉取 {conv['fetched']} 条，"
+            f"应用对话记录（{mode}）：{conv['app_count']} 个应用拉取 {conv['fetched']} 条，"
             f"新增 {conv['inserted']} 条"
         )
 
@@ -294,7 +317,12 @@ def sync_conversation_records(
     project: Project = Depends(require_project_admin),
     db: Session = Depends(get_db),
 ):
-    """遍历项目下所有应用，拉取对话记录并去重入库。时间范围默认最近 7 天。"""
+    """遍历项目下所有应用，拉取对话记录并去重入库。
+
+    默认增量同步（以已入库水位线为起点）；带 full=true 时按 begin 全量回补。
+    受最小同步间隔限频保护，过于频繁将返回 429。
+    """
+    _guard_conv_sync_rate(project)
     now = datetime.now()
     begin = body.begin or (now - timedelta(days=7)).strftime("%Y-%m-%d 00:00:00")
     end = body.end or now.strftime("%Y-%m-%d %H:%M:%S")
@@ -305,10 +333,13 @@ def sync_conversation_records(
         begin=begin,
         end=end,
         max_records_per_app=body.max_records_per_app,
+        incremental=not body.full,
     )
+    get_project_repository(db).save(project)  # 持久化同步水位时间
     source = result["source"]
+    mode = "全量" if body.full else "增量"
     message = (
-        f"同步完成：{result['app_count']} 个应用，拉取 {result['fetched']} 条，"
+        f"同步完成（{mode}）：{result['app_count']} 个应用，拉取 {result['fetched']} 条，"
         f"新增入库 {result['inserted']} 条"
         + ("" if source == "live" else "（Mock 演示数据）")
     )
@@ -320,6 +351,70 @@ def sync_conversation_records(
         message=message,
         synced_at=datetime.utcnow(),
     )
+
+
+# ---------------- 异步对话同步任务（后台执行 + 进度轮询） ----------------
+CONV_JOB_SCOPE = "conversations"
+
+
+@router.post("/{project_id}/conversation-sync-jobs", response_model=SyncJobOut)
+def start_conversation_sync_job(
+    background: BackgroundTasks,
+    body: ConversationSyncRequest = ConversationSyncRequest(),
+    project: Project = Depends(require_project_admin),
+    db: Session = Depends(get_db),
+):
+    """启动一次后台对话同步任务，立即返回任务对象，前端据此轮询进度。
+
+    - 受最小同步间隔限频保护（429）。
+    - 同一项目同一时刻仅允许一个进行中的对话同步任务（409）。
+    """
+    _guard_conv_sync_rate(project)
+    job_repo = get_sync_job_repository(db)
+    if job_repo.has_active(project.id, CONV_JOB_SCOPE):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="已有进行中的对话同步任务，请等待其完成后再试",
+        )
+    now = datetime.now()
+    begin = body.begin or (now - timedelta(days=7)).strftime("%Y-%m-%d 00:00:00")
+    end = body.end or now.strftime("%Y-%m-%d %H:%M:%S")
+    incremental = not body.full
+    job = job_repo.create(project.id, CONV_JOB_SCOPE, incremental)
+    background.add_task(
+        run_conversation_sync_job,
+        job.id,
+        project.id,
+        begin,
+        end,
+        body.max_records_per_app,
+        incremental,
+    )
+    return job
+
+
+@router.get(
+    "/{project_id}/conversation-sync-jobs/latest", response_model=Optional[SyncJobOut]
+)
+def latest_conversation_sync_job(
+    project: Project = Depends(require_project_access),
+    db: Session = Depends(get_db),
+):
+    """返回该项目最近一次对话同步任务（无则返回 null），用于前端进入页面时恢复进度。"""
+    return get_sync_job_repository(db).latest_for_project(project.id, CONV_JOB_SCOPE)
+
+
+@router.get("/{project_id}/conversation-sync-jobs/{job_id}", response_model=SyncJobOut)
+def get_conversation_sync_job(
+    job_id: int,
+    project: Project = Depends(require_project_access),
+    db: Session = Depends(get_db),
+):
+    """查询指定同步任务状态（按项目归属校验）。"""
+    job = get_sync_job_repository(db).get_for_project(project.id, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="同步任务不存在")
+    return job
 
 
 @router.get("/{project_id}/conversations", response_model=ConversationPage)

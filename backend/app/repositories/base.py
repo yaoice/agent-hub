@@ -110,12 +110,19 @@ class ProviderRepository(abc.ABC):
 
 class ConversationRepository(abc.ABC):
     @abc.abstractmethod
-    def existing_record_ids(self, project_id: int) -> set[str]:
-        """返回该项目已入库的所有 record_id，用于去重。"""
+    def existing_record_ids(self, project_id: int, since: Optional[str] = None) -> set[str]:
+        """返回该项目已入库的 record_id 集合，用于去重。
+
+        since 非空时仅返回 msg_create_time >= since 的记录，配合增量同步缩小内存占用。
+        """
+
+    @abc.abstractmethod
+    def latest_msg_create_time(self, project_id: int) -> Optional[str]:
+        """返回该项目已入库对话的最大 msg_create_time（增量同步的水位线）。"""
 
     @abc.abstractmethod
     def bulk_insert(self, records: list[models.ConversationRecord]) -> int:
-        """批量插入并返回成功插入的条数。"""
+        """幂等批量插入并返回实际新增条数（依赖唯一约束跳过重复）。"""
 
     @abc.abstractmethod
     def list_records(
@@ -168,3 +175,46 @@ class ConversationRepository(abc.ABC):
         intent: Optional[str] = None,
     ) -> list[tuple[str, int]]:
         """按意图分类聚合，返回 [(intent, count)]，按 count 降序。"""
+
+
+class SyncJobRepository(abc.ABC):
+    @abc.abstractmethod
+    def create(self, project_id: int, scope: str, incremental: bool) -> models.SyncJob:
+        """创建一条 pending 状态的同步任务。"""
+
+    @abc.abstractmethod
+    def get(self, job_id: int) -> Optional[models.SyncJob]:
+        """按 id 获取任务。"""
+
+    @abc.abstractmethod
+    def get_for_project(self, project_id: int, job_id: int) -> Optional[models.SyncJob]:
+        """按项目归属获取任务（带 project 校验）。"""
+
+    @abc.abstractmethod
+    def latest_for_project(self, project_id: int, scope: str) -> Optional[models.SyncJob]:
+        """返回该项目指定范围的最近一条任务。"""
+
+    @abc.abstractmethod
+    def has_active(self, project_id: int, scope: str) -> bool:
+        """是否存在 pending/running 的同步任务（用于并发互斥）。"""
+
+    @abc.abstractmethod
+    def mark_running(self, job_id: int) -> None: ...
+
+    @abc.abstractmethod
+    def update_progress(self, job_id: int, app_done: int, app_total: int, fetched: int) -> None: ...
+
+    @abc.abstractmethod
+    def mark_success(
+        self,
+        job_id: int,
+        *,
+        source: str,
+        app_total: int,
+        fetched: int,
+        inserted: int,
+        message: str,
+    ) -> None: ...
+
+    @abc.abstractmethod
+    def mark_failed(self, job_id: int, error: str) -> None: ...

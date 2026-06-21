@@ -74,6 +74,10 @@ class Project(Base):
     secret_key_enc: Mapped[str] = mapped_column(Text, nullable=False)
     region: Mapped[str] = mapped_column(String(32), default="1")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # 对话记录最近一次成功同步时间（UTC），用于手动同步的最小间隔限频与增量起点
+    last_conv_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, default=None
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
@@ -155,5 +159,38 @@ class ConversationRecord(Base):
     msg_create_time: Mapped[str] = mapped_column(String(32), default="", index=True)
     raw: Mapped[str] = mapped_column(Text, default="")
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    project: Mapped["Project"] = relationship()
+
+
+class SyncJob(Base):
+    """异步同步任务：记录一次后台同步的进度与结果，供前端轮询。"""
+
+    __tablename__ = "sync_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    # 任务范围（当前仅 conversations）
+    scope: Mapped[str] = mapped_column(String(32), default="conversations", nullable=False)
+    # 状态：pending / running / success / failed
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True, nullable=False)
+    incremental: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # 进度：已处理应用 / 应用总数；以及累计拉取与新增入库
+    app_total: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    app_done: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    fetched: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    inserted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    source: Mapped[str] = mapped_column(String(16), default="")  # live / mock
+    message: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
 
     project: Mapped["Project"] = relationship()

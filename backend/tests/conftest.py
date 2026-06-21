@@ -11,6 +11,8 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_TMP_DB}"
 os.environ["APP_SECRET"] = "test-secret-please-ignore"
 os.environ["DEFAULT_ADMIN_USERNAME"] = "admin"
 os.environ["DEFAULT_ADMIN_PASSWORD"] = "admin"
+# 默认关闭对话同步限频，便于用例连续同步；限频行为由专门用例显式开启验证
+os.environ["CONV_SYNC_MIN_INTERVAL_SECONDS"] = "0"
 
 from fastapi.testclient import TestClient  # noqa: E402
 

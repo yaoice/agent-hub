@@ -107,6 +107,7 @@ export interface SyncPayload {
   conv_begin?: string
   conv_end?: string
   max_records_per_app?: number
+  full?: boolean
 }
 
 export interface SyncResult {
@@ -154,6 +155,33 @@ export interface ConversationSyncResult {
   inserted: number
   message: string
   synced_at: string
+}
+
+export interface ConversationSyncPayload {
+  begin?: string
+  end?: string
+  max_records_per_app?: number
+  full?: boolean
+}
+
+export type SyncJobStatus = 'pending' | 'running' | 'success' | 'failed'
+
+export interface SyncJob {
+  id: number
+  project_id: number
+  scope: string
+  status: SyncJobStatus
+  incremental: boolean
+  app_total: number
+  app_done: number
+  fetched: number
+  inserted: number
+  source: string
+  message: string
+  error: string
+  created_at: string
+  updated_at: string
+  finished_at: string | null
 }
 
 export interface TrendPoint {

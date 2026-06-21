@@ -28,6 +28,15 @@ class Settings(BaseSettings):
     # SSRF 防护开关
     allow_internal_hosts: bool = False
 
+    # 对话同步最小间隔（秒）：手动同步限频，两次之间至少间隔该时长；0 表示不限制
+    conv_sync_min_interval_seconds: int = 300
+
+    # 对话同步：相邻应用拉取之间的限速间隔（毫秒），仅对实时拉取生效，避免触发云端 QPS 限制
+    conv_sync_app_delay_ms: int = 100
+
+    # 是否存储对话原始报文（raw 字段）：默认关闭以节省存储空间，排障时可临时开启
+    conv_store_raw: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

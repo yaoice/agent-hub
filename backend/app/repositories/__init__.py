@@ -15,6 +15,7 @@ from .base import (
     ProjectMemberRepository,
     ProjectRepository,
     ProviderRepository,
+    SyncJobRepository,
     UserRepository,
 )
 from .sqlalchemy_impl import (
@@ -23,6 +24,7 @@ from .sqlalchemy_impl import (
     SqlAlchemyProjectMemberRepository,
     SqlAlchemyProjectRepository,
     SqlAlchemyProviderRepository,
+    SqlAlchemySyncJobRepository,
     SqlAlchemyUserRepository,
 )
 
@@ -35,6 +37,7 @@ _BACKENDS = {
         "metric": SqlAlchemyMetricRepository,
         "provider": SqlAlchemyProviderRepository,
         "conversation": SqlAlchemyConversationRepository,
+        "sync_job": SqlAlchemySyncJobRepository,
     },
 }
 
@@ -70,6 +73,10 @@ def get_conversation_repository(db: Session) -> ConversationRepository:
     return _impls()["conversation"](db)
 
 
+def get_sync_job_repository(db: Session) -> SyncJobRepository:
+    return _impls()["sync_job"](db)
+
+
 __all__ = [
     "UserRepository",
     "ProjectRepository",
@@ -77,10 +84,12 @@ __all__ = [
     "MetricRepository",
     "ProviderRepository",
     "ConversationRepository",
+    "SyncJobRepository",
     "get_user_repository",
     "get_project_repository",
     "get_project_member_repository",
     "get_metric_repository",
     "get_provider_repository",
     "get_conversation_repository",
+    "get_sync_job_repository",
 ]

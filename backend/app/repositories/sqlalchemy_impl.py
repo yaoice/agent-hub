@@ -5,9 +5,11 @@
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .. import models
@@ -208,20 +210,48 @@ class SqlAlchemyConversationRepository(base.ConversationRepository):
     def __init__(self, db: Session):
         self.db = db
 
-    def existing_record_ids(self, project_id: int) -> set[str]:
-        rows = self.db.scalars(
-            select(models.ConversationRecord.record_id).where(
-                models.ConversationRecord.project_id == project_id
-            )
-        ).all()
+    def existing_record_ids(self, project_id: int, since: Optional[str] = None) -> set[str]:
+        stmt = select(models.ConversationRecord.record_id).where(
+            models.ConversationRecord.project_id == project_id
+        )
+        if since:
+            # 增量场景仅取水位线之后的记录，避免把项目全量 record_id 载入内存
+            stmt = stmt.where(models.ConversationRecord.msg_create_time >= since)
+        rows = self.db.scalars(stmt).all()
         return set(rows)
+
+    def latest_msg_create_time(self, project_id: int) -> Optional[str]:
+        value = self.db.scalar(
+            select(func.max(models.ConversationRecord.msg_create_time)).where(
+                models.ConversationRecord.project_id == project_id,
+                models.ConversationRecord.msg_create_time != "",
+            )
+        )
+        return value or None
 
     def bulk_insert(self, records: list[models.ConversationRecord]) -> int:
         if not records:
             return 0
-        self.db.add_all(records)
+        # 正常路径：批量插入。冲突（并发/重复 record_id）时回退逐条幂等插入。
+        try:
+            self.db.add_all(records)
+            self.db.commit()
+            return len(records)
+        except IntegrityError:
+            self.db.rollback()
+
+        inserted = 0
+        for rec in records:
+            try:
+                with self.db.begin_nested():
+                    self.db.add(rec)
+                    self.db.flush()
+                inserted += 1
+            except IntegrityError:
+                # 命中唯一约束 uq_conv_record，视为已存在，跳过
+                continue
         self.db.commit()
-        return len(records)
+        return inserted
 
     def _apply_filters(
         self,
@@ -343,3 +373,92 @@ class SqlAlchemyConversationRepository(base.ConversationRepository):
             ((row.intent or "未分类"), int(row.cnt))
             for row in self.db.execute(stmt).all()
         ]
+
+
+class SqlAlchemySyncJobRepository(base.SyncJobRepository):
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create(self, project_id: int, scope: str, incremental: bool) -> models.SyncJob:
+        job = models.SyncJob(project_id=project_id, scope=scope, incremental=incremental)
+        self.db.add(job)
+        self.db.commit()
+        self.db.refresh(job)
+        return job
+
+    def get(self, job_id: int) -> Optional[models.SyncJob]:
+        return self.db.get(models.SyncJob, job_id)
+
+    def get_for_project(self, project_id: int, job_id: int) -> Optional[models.SyncJob]:
+        job = self.db.get(models.SyncJob, job_id)
+        if job is None or job.project_id != project_id:
+            return None
+        return job
+
+    def latest_for_project(self, project_id: int, scope: str) -> Optional[models.SyncJob]:
+        return self.db.scalar(
+            select(models.SyncJob)
+            .where(models.SyncJob.project_id == project_id, models.SyncJob.scope == scope)
+            .order_by(models.SyncJob.id.desc())
+            .limit(1)
+        )
+
+    def has_active(self, project_id: int, scope: str) -> bool:
+        count = self.db.scalar(
+            select(func.count())
+            .select_from(models.SyncJob)
+            .where(
+                models.SyncJob.project_id == project_id,
+                models.SyncJob.scope == scope,
+                models.SyncJob.status.in_(("pending", "running")),
+            )
+        )
+        return bool(count)
+
+    def mark_running(self, job_id: int) -> None:
+        job = self.db.get(models.SyncJob, job_id)
+        if job is None:
+            return
+        job.status = "running"
+        self.db.commit()
+
+    def update_progress(self, job_id: int, app_done: int, app_total: int, fetched: int) -> None:
+        job = self.db.get(models.SyncJob, job_id)
+        if job is None:
+            return
+        job.app_done = app_done
+        job.app_total = app_total
+        job.fetched = fetched
+        self.db.commit()
+
+    def mark_success(
+        self,
+        job_id: int,
+        *,
+        source: str,
+        app_total: int,
+        fetched: int,
+        inserted: int,
+        message: str,
+    ) -> None:
+        job = self.db.get(models.SyncJob, job_id)
+        if job is None:
+            return
+        job.status = "success"
+        job.source = source
+        job.app_total = app_total
+        job.app_done = app_total
+        job.fetched = fetched
+        job.inserted = inserted
+        job.message = message
+        job.finished_at = datetime.utcnow()
+        self.db.commit()
+
+    def mark_failed(self, job_id: int, error: str) -> None:
+        job = self.db.get(models.SyncJob, job_id)
+        if job is None:
+            return
+        job.status = "failed"
+        job.error = error[:2000]
+        job.finished_at = datetime.utcnow()
+        self.db.commit()

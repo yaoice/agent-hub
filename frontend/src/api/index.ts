@@ -3,6 +3,7 @@ import type {
   ConversationPage,
   ConversationQuery,
   ConversationStats,
+  ConversationSyncPayload,
   ConversationSyncResult,
   DashboardResponse,
   LoginResponse,
@@ -10,6 +11,7 @@ import type {
   ProjectForm,
   ProjectMember,
   Provider,
+  SyncJob,
   SyncPayload,
   SyncResult,
   UserCreateForm,
@@ -120,9 +122,27 @@ export const conversationApi = {
       .get<ConversationStats>(`/projects/${projectId}/conversation-stats`, { params: query })
       .then((r) => r.data)
   },
-  sync(projectId: number, payload?: { begin?: string; end?: string; max_records_per_app?: number }) {
+  sync(projectId: number, payload?: ConversationSyncPayload) {
     return http
       .post<ConversationSyncResult>(`/projects/${projectId}/sync-conversations`, payload || {})
+      .then((r) => r.data)
+  },
+  // 启动异步同步任务，返回任务对象（用于轮询）
+  startSyncJob(projectId: number, payload?: ConversationSyncPayload) {
+    return http
+      .post<SyncJob>(`/projects/${projectId}/conversation-sync-jobs`, payload || {})
+      .then((r) => r.data)
+  },
+  // 查询指定同步任务进度
+  getSyncJob(projectId: number, jobId: number) {
+    return http
+      .get<SyncJob>(`/projects/${projectId}/conversation-sync-jobs/${jobId}`)
+      .then((r) => r.data)
+  },
+  // 获取最近一次同步任务（进入页面时恢复进度），无则返回 null
+  latestSyncJob(projectId: number) {
+    return http
+      .get<SyncJob | null>(`/projects/${projectId}/conversation-sync-jobs/latest`)
       .then((r) => r.data)
   },
 }

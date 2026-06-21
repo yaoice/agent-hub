@@ -3,6 +3,7 @@
 
 dev 环境如遇旧库结构（旧 Provider 含凭证），请删除 backend/agent_hub.db 后重启重建。
 """
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
 from .config import settings
@@ -10,6 +11,22 @@ from .database import Base, SessionLocal, engine
 from .models import Project, Provider, ProjectMember, User
 from .providers.registry import BUILTIN_PROVIDERS
 from .security import encrypt_secret, hash_password
+
+
+def _ensure_schema() -> None:
+    """轻量补列：为已存在的旧库追加新增字段，避免必须删库重建。
+
+    仅做向后兼容的 ADD COLUMN（SQLite/MySQL 通用），不改动既有数据。
+    """
+    inspector = inspect(engine)
+    if "projects" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("projects")}
+    if "last_conv_synced_at" not in columns:
+        with engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE projects ADD COLUMN last_conv_synced_at DATETIME")
+            )
 
 
 def _seed_providers(db: Session) -> None:
@@ -33,6 +50,7 @@ def _seed_providers(db: Session) -> None:
 
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
+    _ensure_schema()
     db: Session = SessionLocal()
     try:
         # 默认管理员

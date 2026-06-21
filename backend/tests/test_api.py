@@ -195,6 +195,134 @@ def test_sync_conversations_and_dedup(client):
         assert "question" in row and "answer" in row and "app_biz_id" in row
 
 
+def test_conv_sync_rate_limited(client, monkeypatch):
+    """开启最小同步间隔后，短时间内重复同步应被限频（429）。"""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "conv_sync_min_interval_seconds", 300)
+
+    token = login(client, "admin", "admin")
+    h = auth_headers(token)
+    pid = _create_mock_project(client, h, name="限频项目")
+
+    # 首次同步成功
+    first = client.post(f"/api/projects/{pid}/sync-conversations", json={}, headers=h)
+    assert first.status_code == 200, first.text
+
+    # 立即再次同步：被限频拒绝
+    second = client.post(f"/api/projects/{pid}/sync-conversations", json={}, headers=h)
+    assert second.status_code == 429
+    assert "频繁" in second.json()["detail"]
+
+    # 全量回补同样受限频保护
+    full = client.post(
+        f"/api/projects/{pid}/sync-conversations", json={"full": True}, headers=h
+    )
+    assert full.status_code == 429
+
+    # /sync 入口含 conversations 范围时同样受限
+    via_sync = client.post(
+        f"/api/projects/{pid}/sync", json={"scopes": ["conversations"]}, headers=h
+    )
+    assert via_sync.status_code == 429
+
+
+def _poll_job(client, headers, pid, job_id, tries=20):
+    """轮询任务直到进入终态（success/failed）。"""
+    import time as _t
+
+    for _ in range(tries):
+        job = client.get(
+            f"/api/projects/{pid}/conversation-sync-jobs/{job_id}", headers=headers
+        ).json()
+        if job["status"] in ("success", "failed"):
+            return job
+        _t.sleep(0.05)
+    return job
+
+
+def test_async_conversation_sync_job(client):
+    """异步对话同步：启动任务 -> 轮询 -> 成功，进度与入库数据正确。"""
+    token = login(client, "admin", "admin")
+    h = auth_headers(token)
+    pid = _create_mock_project(client, h, name="异步同步项目")
+
+    start = client.post(f"/api/projects/{pid}/conversation-sync-jobs", json={}, headers=h)
+    assert start.status_code == 200, start.text
+    job0 = start.json()
+    assert job0["status"] in ("pending", "running", "success")
+    job_id = job0["id"]
+
+    job = _poll_job(client, h, pid, job_id)
+    assert job["status"] == "success", job
+    assert job["source"] == "mock"
+    assert job["app_total"] > 0
+    assert job["app_done"] == job["app_total"]
+    assert job["inserted"] > 0
+
+    # 入库数据可查询，且与任务统计一致
+    page = client.get(f"/api/projects/{pid}/conversations?limit=1", headers=h).json()
+    assert page["total"] == job["inserted"]
+
+    # latest 接口返回该任务
+    latest = client.get(
+        f"/api/projects/{pid}/conversation-sync-jobs/latest", headers=h
+    ).json()
+    assert latest is not None and latest["id"] == job_id
+
+    # 不存在的任务 -> 404
+    missing = client.get(
+        f"/api/projects/{pid}/conversation-sync-jobs/999999", headers=h
+    )
+    assert missing.status_code == 404
+
+
+def test_async_conversation_sync_job_rate_limited(client, monkeypatch):
+    """异步任务同样受最小同步间隔限频保护。"""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "conv_sync_min_interval_seconds", 300)
+
+    token = login(client, "admin", "admin")
+    h = auth_headers(token)
+    pid = _create_mock_project(client, h, name="异步限频项目")
+
+    first = client.post(f"/api/projects/{pid}/conversation-sync-jobs", json={}, headers=h)
+    assert first.status_code == 200, first.text
+    _poll_job(client, h, pid, first.json()["id"])
+
+    # 完成后水位时间已更新，立即再次启动被限频
+    second = client.post(f"/api/projects/{pid}/conversation-sync-jobs", json={}, headers=h)
+    assert second.status_code == 429
+
+
+def test_async_conversation_sync_job_requires_admin(client):
+    """启动异步任务需要项目管理员；普通成员仅可查询。"""
+    token = login(client, "admin", "admin")
+    h = auth_headers(token)
+    pid = _create_mock_project(client, h, name="异步权限项目")
+
+    bob_id = client.post(
+        "/api/users",
+        json={"username": "dave", "password": "secret", "role": "user"},
+        headers=h,
+    ).json()["id"]
+    client.post(
+        f"/api/projects/{pid}/members",
+        json={"user_id": bob_id, "project_role": "member"},
+        headers=h,
+    )
+    bob_h = auth_headers(login(client, "dave", "secret"))
+
+    denied = client.post(
+        f"/api/projects/{pid}/conversation-sync-jobs", json={}, headers=bob_h
+    )
+    assert denied.status_code == 403
+    # 成员可查询 latest
+    ok = client.get(f"/api/projects/{pid}/conversation-sync-jobs/latest", headers=bob_h)
+    assert ok.status_code == 200
+
+
 def test_conversation_stats(client):
     token = login(client, "admin", "admin")
     h = auth_headers(token)
