@@ -1,5 +1,6 @@
 import http from './http'
 import type {
+  ConversationAppOption,
   ConversationPage,
   ConversationQuery,
   ConversationStats,
@@ -114,7 +115,7 @@ export const conversationApi = {
   },
   apps(projectId: number) {
     return http
-      .get<string[]>(`/projects/${projectId}/conversation-apps`)
+      .get<ConversationAppOption[]>(`/projects/${projectId}/conversation-apps`)
       .then((r) => r.data)
   },
   stats(projectId: number, query: ConversationQuery = {}) {
@@ -143,6 +144,12 @@ export const conversationApi = {
   latestSyncJob(projectId: number) {
     return http
       .get<SyncJob | null>(`/projects/${projectId}/conversation-sync-jobs/latest`)
+      .then((r) => r.data)
+  },
+  // 请求终止进行中的同步任务
+  cancelSyncJob(projectId: number, jobId: number) {
+    return http
+      .post<SyncJob>(`/projects/${projectId}/conversation-sync-jobs/${jobId}/cancel`)
       .then((r) => r.data)
   },
 }

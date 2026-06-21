@@ -220,12 +220,6 @@ def test_conv_sync_rate_limited(client, monkeypatch):
     )
     assert full.status_code == 429
 
-    # /sync 入口含 conversations 范围时同样受限
-    via_sync = client.post(
-        f"/api/projects/{pid}/sync", json={"scopes": ["conversations"]}, headers=h
-    )
-    assert via_sync.status_code == 429
-
 
 def _poll_job(client, headers, pid, job_id, tries=20):
     """轮询任务直到进入终态（success/failed）。"""
@@ -370,10 +364,11 @@ def test_conversation_filters_and_apps(client):
 
     client.post(f"/api/projects/{pid}/sync-conversations", json={}, headers=h)
 
-    # conversation-apps：返回去重后的 app_biz_id 列表
+    # conversation-apps：返回去重后的应用列表（app_biz_id + 应用名称）
     apps = client.get(f"/api/projects/{pid}/conversation-apps", headers=h).json()
     assert isinstance(apps, list) and len(apps) > 0
-    app_id = apps[0]
+    assert "app_biz_id" in apps[0] and "app_name" in apps[0]
+    app_id = apps[0]["app_biz_id"]
 
     # 按应用过滤：所有记录的 app_biz_id 一致
     page = client.get(
@@ -464,16 +459,22 @@ def test_sync_all_scopes(client):
     token = login(client, "admin", "admin")
     h = auth_headers(token)
     pid = _create_mock_project(client, h, name="全选项目")
+    # 看板范围：应用数量 + token 消耗
     resp = client.post(
         f"/api/projects/{pid}/sync",
-        json={"scopes": ["app_count", "conversations", "token"]},
+        json={"scopes": ["app_count", "token"]},
         headers=h,
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert set(body["scopes"]) == {"app_count", "conversations", "token"}
-    assert "dashboard" in body["details"] and "conversations" in body["details"]
-    assert body["details"]["conversations"]["inserted"] > 0
+    assert set(body["scopes"]) == {"app_count", "token"}
+    assert "dashboard" in body["details"]
+
+    # 对话记录已不再属于 /sync 范围，传入应被判为非法范围
+    invalid = client.post(
+        f"/api/projects/{pid}/sync", json={"scopes": ["conversations"]}, headers=h
+    )
+    assert invalid.status_code == 400
 
 
 def test_change_password_requires_current_and_confirm(client):

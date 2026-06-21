@@ -160,14 +160,9 @@ class ProjectMemberOut(BaseModel):
 
 
 class SyncRequest(BaseModel):
-    # 同步范围子集：app_count / token / conversations；留空默认 [app_count, token]
+    # 同步范围子集：app_count / token；留空默认 [app_count, token]
+    # （对话记录同步已独立到对话记录页的异步任务接口）
     scopes: Optional[list[str]] = None
-    # 对话同步可选时间范围与上限
-    conv_begin: Optional[str] = None
-    conv_end: Optional[str] = None
-    max_records_per_app: int = Field(default=500, ge=1, le=5000)
-    # 全量回补：True 时忽略增量水位，按 conv_begin 起点全量拉取
-    full: bool = False
 
 
 class SyncResult(BaseModel):
@@ -181,7 +176,7 @@ class SyncResult(BaseModel):
 
 # ---------- 对话记录 ----------
 class ConversationSyncRequest(BaseModel):
-    # 时间范围（"YYYY-MM-DD HH:MM:SS"）；留空默认最近 7 天
+    # 时间范围（"YYYY-MM-DD HH:MM:SS"）；留空默认最近 30 天
     begin: Optional[str] = None
     end: Optional[str] = None
     max_records_per_app: int = Field(default=500, ge=1, le=5000)
@@ -224,13 +219,16 @@ class SyncJobOut(BaseModel):
 class ConversationOut(BaseModel):
     id: int
     app_biz_id: str
+    app_name: str = ""
     session_id: str
     user_biz_id: str
     user_nickname: str
     question: str
     answer: str
+    intent: str = ""
     intent_category: str
-    create_time: str = Field(alias="msg_create_time")
+    # 仅作为读取 ORM 属性 msg_create_time 的输入别名；序列化输出键仍为 create_time
+    create_time: str = Field(validation_alias="msg_create_time")
     synced_at: datetime
 
     class Config:
@@ -241,6 +239,13 @@ class ConversationOut(BaseModel):
 class ConversationPage(BaseModel):
     total: int
     items: list[ConversationOut]
+
+
+class ConversationAppOption(BaseModel):
+    """对话记录过滤下拉项：应用 ID + 名称。"""
+
+    app_biz_id: str
+    app_name: str = ""
 
 
 class TrendPoint(BaseModel):

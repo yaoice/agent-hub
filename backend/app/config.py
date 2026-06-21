@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     # 是否存储对话原始报文（raw 字段）：默认关闭以节省存储空间，排障时可临时开启
     conv_store_raw: bool = False
 
+    # 日志级别开关：DEBUG / INFO / WARNING / ERROR（不区分大小写）。
+    # 设为 DEBUG 可看到 Provider 出站请求等更详细信息，便于排障。
+    log_level: str = "INFO"
+    # 是否打印 Provider 出站请求的详细信息（接口名/HOST/耗时等），排障时开启
+    provider_debug: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

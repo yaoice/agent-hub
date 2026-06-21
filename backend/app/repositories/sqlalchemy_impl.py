@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -325,14 +325,16 @@ class SqlAlchemyConversationRepository(base.ConversationRepository):
         stmt = self._apply_filters(stmt, app_biz_id, begin, end, keyword, intent)
         return int(self.db.scalar(stmt) or 0)
 
-    def list_app_ids(self, project_id: int) -> list[str]:
-        rows = self.db.scalars(
-            select(models.ConversationRecord.app_biz_id)
-            .where(models.ConversationRecord.project_id == project_id)
-            .distinct()
-            .order_by(models.ConversationRecord.app_biz_id)
+    def list_app_options(self, project_id: int) -> list[tuple[str, str]]:
+        C = models.ConversationRecord
+        # 同一 app_biz_id 可能存在历史空 app_name 与新值，取非空名称的最大值兜底
+        rows = self.db.execute(
+            select(C.app_biz_id, func.max(C.app_name))
+            .where(C.project_id == project_id)
+            .group_by(C.app_biz_id)
+            .order_by(C.app_biz_id)
         ).all()
-        return [r for r in rows if r]
+        return [(aid, name or "") for aid, name in rows if aid]
 
     def trend_by_day(
         self,
@@ -410,7 +412,7 @@ class SqlAlchemySyncJobRepository(base.SyncJobRepository):
             .where(
                 models.SyncJob.project_id == project_id,
                 models.SyncJob.scope == scope,
-                models.SyncJob.status.in_(("pending", "running")),
+                models.SyncJob.status.in_(("pending", "running", "cancelling")),
             )
         )
         return bool(count)
@@ -462,3 +464,38 @@ class SqlAlchemySyncJobRepository(base.SyncJobRepository):
         job.error = error[:2000]
         job.finished_at = datetime.utcnow()
         self.db.commit()
+
+    def request_cancel(self, project_id: int, job_id: int) -> bool:
+        job = self.db.get(models.SyncJob, job_id)
+        if job is None or job.project_id != project_id:
+            return False
+        if job.status not in ("pending", "running"):
+            return False
+        job.status = "cancelling"
+        self.db.commit()
+        return True
+
+    def is_cancelling(self, job_id: int) -> bool:
+        # 用独立标量查询读取最新状态（避免身份映射缓存），供后台任务每个应用检查一次
+        status = self.db.scalar(
+            select(models.SyncJob.status).where(models.SyncJob.id == job_id)
+        )
+        return status == "cancelling"
+
+    def mark_cancelled(self, job_id: int, message: str) -> None:
+        job = self.db.get(models.SyncJob, job_id)
+        if job is None:
+            return
+        job.status = "cancelled"
+        job.message = message
+        job.finished_at = datetime.utcnow()
+        self.db.commit()
+
+    def fail_active_jobs(self, error: str) -> int:
+        res = self.db.execute(
+            update(models.SyncJob)
+            .where(models.SyncJob.status.in_(("pending", "running", "cancelling")))
+            .values(status="failed", error=error[:2000], finished_at=datetime.utcnow())
+        )
+        self.db.commit()
+        return res.rowcount or 0

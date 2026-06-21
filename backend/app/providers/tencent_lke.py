@@ -10,19 +10,25 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
+from ..config import settings
 from .base import AppItem, BaseProvider, ConversationItem, ProviderError, SpaceItem, TokenItem
 from .ssrf import assert_safe_host
+
+logger = logging.getLogger(__name__)
 
 VERSION = "2023-11-30"
 SERVICE = "lke"
 HTTP_TIMEOUT = 15
 MAX_RETRIES = 2
 PAGE_SIZE = 50
+# ListApp 翻页安全上限（PageSize=50 时可覆盖约 2000 个应用，足够且防止排序不稳定时空转）
+MAX_APP_PAGES = 40
 CONV_PAGE_SIZE = 100
 
 
@@ -60,8 +66,10 @@ class TencentLKEProvider(BaseProvider):
     # ---------------- HTTP ----------------
     def _call(self, action: str, payload: dict) -> dict:
         assert_safe_host(self.host)  # SSRF 防护
-        url = f"https://{self.host}/"
+        url = f"{self.scheme}://{self.host}/"
         body = json.dumps(payload, separators=(",", ":")).encode()
+        if settings.provider_debug:
+            logger.debug("LKE 调用 %s host=%s region=%s", action, self.host, self.region)
 
         last_exc: Exception | None = None
         for attempt in range(1, MAX_RETRIES + 1):
@@ -77,13 +85,25 @@ class TencentLKEProvider(BaseProvider):
             }
             req = urllib.request.Request(url, data=body, method="POST", headers=headers)
             try:
+                started = time.time()
                 with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # noqa: S310
                     data = json.loads(resp.read())
                 inner = data.get("Response", {})
                 if "Error" in inner:
                     err = inner["Error"]
+                    # 业务错误（鉴权/参数等）记到日志，便于排障定位回退 Mock 的原因
+                    logger.warning(
+                        "LKE %s 返回错误：%s - %s",
+                        action,
+                        err.get("Code"),
+                        err.get("Message"),
+                    )
                     raise ProviderError(
                         f"{action} 调用失败: {err.get('Code')} - {err.get('Message')}"
+                    )
+                if settings.provider_debug:
+                    logger.debug(
+                        "LKE 调用 %s 成功，耗时 %.0f ms", action, (time.time() - started) * 1000
                     )
                 return inner
             except urllib.error.HTTPError as exc:
@@ -108,8 +128,16 @@ class TencentLKEProvider(BaseProvider):
         return inner.get("List") or []
 
     def _list_apps(self, space_id: str) -> list[dict]:
+        """拉取空间下全部应用，按 AppBizId 去重。
+
+        注意：LKE 的 ListApp 分页可能返回重复记录（排序不稳定导致相邻页重叠），
+        因此不能用「原始条数凑满 Total 就停」，否则会因重复占位而漏拉真实应用。
+        这里改为：翻到真正末页（某页不足一页）或已集齐 Total 个去重应用才停，
+        并设页数上限与「本页 0 新增」安全阀，避免排序不稳定时空转。
+        """
         apps: list[dict] = []
-        for page in range(1, 10):
+        seen: set[str] = set()
+        for page in range(1, MAX_APP_PAGES + 1):
             inner = self._call(
                 "ListApp",
                 {
@@ -120,14 +148,27 @@ class TencentLKEProvider(BaseProvider):
                 },
             )
             items = inner.get("List") or []
-            apps.extend(items)
+            before = len(seen)
+            for a in items:
+                aid = str(a.get("AppBizId") or "")
+                if aid and aid in seen:
+                    continue
+                if aid:
+                    seen.add(aid)
+                apps.append(a)
             try:
                 total = int(inner.get("Total") or 0)
             except (TypeError, ValueError):
                 total = 0
-            if total > 0 and len(apps) >= total:
-                break
+
+            # 真正末页（返回不足一页）
             if len(items) < PAGE_SIZE:
+                break
+            # 已集齐 Total 个去重应用
+            if total > 0 and len(seen) >= total:
+                break
+            # 安全阀：整页都是重复、没有任何新增，停止避免空转
+            if len(seen) == before:
                 break
         return apps
 
@@ -214,7 +255,8 @@ class TencentLKEProvider(BaseProvider):
             user_nickname=item.get("UserBizNickname") or "",
             question=question,
             answer=answer,
-            intent_category=item.get("IntentCategory") or item.get("Intent") or "",
+            intent=item.get("Intent") or "",
+            intent_category=item.get("IntentCategory") or "",
             create_time=create_time,
             raw=item,
         )

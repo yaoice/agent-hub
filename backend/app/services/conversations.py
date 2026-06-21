@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from datetime import datetime
 from typing import Any, Callable, Optional
@@ -15,6 +16,8 @@ from ..providers.base import ConversationItem
 from ..providers.registry import build_provider
 from ..repositories.base import ConversationRepository
 from ..security import decrypt_secret
+
+logger = logging.getLogger(__name__)
 
 # 进度回调签名：(已处理应用数, 应用总数, 累计拉取条数) -> None
 ProgressCallback = Callable[[int, int, int], None]
@@ -49,18 +52,22 @@ def _collect_apps(spaces) -> list[tuple[str, str]]:
     return apps
 
 
-def _to_record(project_id: int, app_biz_id: str, item: ConversationItem) -> models.ConversationRecord:
+def _to_record(
+    project_id: int, app_biz_id: str, app_name: str, item: ConversationItem
+) -> models.ConversationRecord:
     # raw 默认不落库以节省存储；可经 CONV_STORE_RAW 开启用于排障
     raw = json.dumps(item.raw, ensure_ascii=False) if (settings.conv_store_raw and item.raw) else ""
     return models.ConversationRecord(
         project_id=project_id,
         app_biz_id=app_biz_id,
+        app_name=app_name,
         record_id=item.record_id,
         session_id=item.session_id,
         user_biz_id=item.user_biz_id,
         user_nickname=item.user_nickname,
         question=item.question,
         answer=item.answer,
+        intent=item.intent,
         intent_category=item.intent_category,
         msg_create_time=item.create_time,
         raw=raw,
@@ -75,6 +82,7 @@ def sync_conversations(
     max_records_per_app: int = 500,
     incremental: bool = True,
     progress_cb: Optional[ProgressCallback] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> dict[str, Any]:
     """同步项目下所有应用的对话记录。
 
@@ -82,8 +90,9 @@ def sync_conversations(
         begin），只拉新增量，显著降低单次同步的拉取量与去重内存占用。
     incremental=False：按传入 begin 全量回补。
     progress_cb：可选进度回调，每处理完一个应用回报 (已完成, 总数, 累计拉取)。
+    should_cancel：可选终止判断回调，遍历每个应用前检查；返回 True 则提前停止并回写已拉取部分。
 
-    返回汇总：{source, app_count, fetched, inserted, begin, incremental}。
+    返回汇总：{source, app_count, fetched, inserted, begin, incremental, cancelled}。
     任意环节失败安全回退 Mock，保证开箱可用。
     """
     # 计算本次有效起点：增量模式下取 max(传入 begin, 已入库水位线)
@@ -110,10 +119,21 @@ def sync_conversations(
             )
             if not client.has_credentials():
                 client = None
+                logger.warning(
+                    "项目[%s] 未配置有效 SECRET_ID/SECRET_KEY，对话同步回退 Mock",
+                    project.id,
+                )
             else:
                 spaces = client.fetch_spaces()
-        except Exception:  # noqa: BLE001 - 回退 Mock
+        except Exception as exc:  # noqa: BLE001 - 回退 Mock
             client = None
+            logger.warning(
+                "项目[%s] 初始化 Provider 或拉取空间失败，对话同步回退 Mock：%s",
+                project.id,
+                exc,
+            )
+    else:
+        logger.info("项目[%s] 已停用，对话同步使用 Mock 数据", project.id)
 
     if client is None:
         source = "mock"
@@ -131,8 +151,14 @@ def sync_conversations(
     fetched = 0
     new_records: list[models.ConversationRecord] = []
     seen_in_batch: set[str] = set()
+    cancelled = False
 
     for idx, (app_biz_id, app_name) in enumerate(apps):
+        # 协作式终止：每个应用开始前检查一次，被请求终止则保留已拉取部分并停止
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            logger.info("项目[%s] 对话同步收到终止请求，已处理 %s/%s 个应用", project.id, idx, total)
+            break
         if delay and idx > 0:
             time.sleep(delay)
         try:
@@ -142,21 +168,38 @@ def sync_conversations(
                 )
             else:
                 items = mock.mock_conversations(app_biz_id, app_name)
-        except Exception:  # noqa: BLE001 - 单个应用失败不影响其它应用
+        except Exception as exc:  # noqa: BLE001 - 单个应用失败不影响其它应用
             items = []
+            logger.warning(
+                "项目[%s] 应用[%s] 拉取对话失败，已跳过该应用：%s",
+                project.id,
+                app_biz_id,
+                exc,
+            )
         fetched += len(items)
         for item in items:
             rid = item.record_id
             if not rid or rid in existing or rid in seen_in_batch:
                 continue
             seen_in_batch.add(rid)
-            new_records.append(_to_record(project.id, app_biz_id, item))
+            new_records.append(_to_record(project.id, app_biz_id, app_name, item))
         if progress_cb is not None:
             progress_cb(idx + 1, total, fetched)
 
     inserted = conv_repo.bulk_insert(new_records)
     # 更新同步水位时间（由调用方负责持久化 project），用于限频与下次增量
     project.last_conv_synced_at = datetime.utcnow()
+    logger.info(
+        "项目[%s] 对话同步%s（%s/%s）：%s 个应用，拉取 %s 条，新增 %s 条，起点 %s",
+        project.id,
+        "已终止" if cancelled else "完成",
+        source,
+        "增量" if incremental else "全量",
+        total,
+        fetched,
+        inserted,
+        effective_begin,
+    )
     return {
         "source": source,
         "app_count": total,
@@ -164,4 +207,5 @@ def sync_conversations(
         "inserted": inserted,
         "begin": effective_begin,
         "incremental": incremental,
+        "cancelled": cancelled,
     }

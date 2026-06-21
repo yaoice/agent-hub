@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ..models import Project
@@ -16,6 +17,8 @@ from ..providers import mock
 from ..providers.base import ProviderError, SpaceItem, TokenItem
 from ..providers.registry import build_provider
 from ..security import decrypt_secret
+
+logger = logging.getLogger(__name__)
 
 STATUS_LABEL = {1: "未上线", 2: "运行中"}
 TOKEN_DIMENSIONS = {1: "space", 2: "app", 3: "model"}
@@ -101,23 +104,27 @@ def empty_dashboard() -> dict[str, Any]:
 
 def fetch_dashboard_parts(
     project: Project, scopes: set[str], force_mock: bool = False
-) -> tuple[dict[str, Any], str]:
+) -> tuple[dict[str, Any], str, list[str]]:
     """按 scope 拉取看板数据的对应部分。
 
-    返回 (partial_data, source)。partial_data 仅包含被请求 scope 对应的键：
+    返回 (partial_data, source, errors)。partial_data 仅包含被请求 scope 对应的键：
       - app_count -> {"overview", "spaces"}
       - token     -> {"token_top"}
     source 为 "live"（全部请求部分均真实拉取成功）或 "mock"（有任意部分回退）。
+    errors 为回退到 Mock 的原因列表（live 时为空），用于向用户清晰反馈失败原因。
     """
     scopes = {s for s in scopes if s in DASHBOARD_SCOPES}
     if not scopes:
-        return {}, "live"
+        return {}, "live", []
 
     parts: dict[str, Any] = {}
     used_mock = False
     client = None
+    errors: list[str] = []
 
-    if not force_mock:
+    if force_mock:
+        errors.append("项目已停用，展示 Mock 演示数据")
+    else:
         try:
             secret_key = decrypt_secret(project.secret_key_enc)
             client = build_provider(
@@ -129,8 +136,10 @@ def fetch_dashboard_parts(
             )
             if not client.has_credentials():
                 client = None
-        except Exception:  # noqa: BLE001
+                errors.append("未配置有效的 SECRET_ID / SECRET_KEY")
+        except Exception as exc:  # noqa: BLE001
             client = None
+            errors.append(f"初始化 Provider 失败：{exc}")
 
     # 应用数量（空间/应用盘点）
     if SCOPE_APP_COUNT in scopes:
@@ -138,8 +147,9 @@ def fetch_dashboard_parts(
         if client is not None:
             try:
                 fetched = _spaces_to_dict(client.fetch_spaces())
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 fetched = None
+                errors.append(f"应用数量拉取失败：{exc}")
         if fetched is None:
             fetched = _mock_app_count()
             used_mock = True
@@ -154,8 +164,9 @@ def fetch_dashboard_parts(
                     name: _tokens_to_dict(client.fetch_token_top(dim))
                     for dim, name in TOKEN_DIMENSIONS.items()
                 }
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 token_top = None
+                errors.append(f"Token 消耗拉取失败：{exc}")
         if token_top is None:
             parts.update(_mock_token_top())
             used_mock = True
@@ -163,12 +174,19 @@ def fetch_dashboard_parts(
             parts["token_top"] = token_top
 
     source = "mock" if (used_mock or client is None) else "live"
-    return parts, source
+    if errors:
+        logger.warning(
+            "项目[%s] 看板同步回退 Mock（scopes=%s）：%s",
+            project.id,
+            sorted(scopes),
+            "；".join(errors),
+        )
+    return parts, source, errors
 
 
 def build_payload(project: Project, force_mock: bool = False) -> tuple[dict[str, Any], str]:
     """构建完整看板数据（应用数量 + Token），用于首次惰性同步等场景。"""
-    parts, source = fetch_dashboard_parts(project, DASHBOARD_SCOPES, force_mock=force_mock)
+    parts, source, _ = fetch_dashboard_parts(project, DASHBOARD_SCOPES, force_mock=force_mock)
     data = empty_dashboard()
     data.update(parts)
     return data, source

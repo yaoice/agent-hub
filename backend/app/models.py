@@ -147,6 +147,8 @@ class ConversationRecord(Base):
         ForeignKey("projects.id", ondelete="CASCADE"), index=True
     )
     app_biz_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    # 应用名称（同步时一并落库，便于看板/导出直接展示，避免再次联查）
+    app_name: Mapped[str] = mapped_column(String(256), default="")
     # 来源记录唯一标识（API 主键或合成哈希），用于幂等去重
     record_id: Mapped[str] = mapped_column(String(128), nullable=False)
     session_id: Mapped[str] = mapped_column(String(128), default="")
@@ -154,6 +156,8 @@ class ConversationRecord(Base):
     user_nickname: Mapped[str] = mapped_column(String(128), default="")
     question: Mapped[str] = mapped_column(Text, default="")
     answer: Mapped[str] = mapped_column(Text, default="")
+    # 意图（如命中的智能体/工作流名称）与意图分类（如「工作流」「文档问答」）
+    intent: Mapped[str] = mapped_column(String(256), default="")
     intent_category: Mapped[str] = mapped_column(String(128), default="")
     # 对话发生时间（保留接口返回的原始字符串）
     msg_create_time: Mapped[str] = mapped_column(String(32), default="", index=True)

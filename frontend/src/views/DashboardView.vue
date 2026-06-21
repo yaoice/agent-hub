@@ -57,14 +57,20 @@
         <!-- 空间应用盘点 -->
         <a-card :bordered="false" class="block" title="空间应用盘点">
           <template #extra>
-            <a-input
-              v-model:value="keyword"
-              placeholder="搜索空间/应用"
-              allow-clear
-              style="width: 220px"
-            >
-              <template #prefix><SearchOutlined /></template>
-            </a-input>
+            <div class="inventory-extra">
+              <a-input
+                v-model:value="keyword"
+                placeholder="搜索空间/应用"
+                allow-clear
+                style="width: 220px"
+              >
+                <template #prefix><SearchOutlined /></template>
+              </a-input>
+              <a-button :disabled="!exportableApps.length" @click="onExportApps">
+                <template #icon><DownloadOutlined /></template>
+                导出应用清单
+              </a-button>
+            </div>
           </template>
           <a-table
             :data-source="filteredSpaces"
@@ -128,6 +134,7 @@ import { useRouter } from 'vue-router'
 import {
   ReloadOutlined,
   SearchOutlined,
+  DownloadOutlined,
   ApartmentOutlined,
   AppstoreOutlined,
   BarChartOutlined,
@@ -210,7 +217,56 @@ function onSwitch() {
 function goConversations(app: AppEntry) {
   if (!app.app_biz_id) return
   projectStore.setCurrent(projectId.value)
-  router.push({ name: 'conversations', query: { app_biz_id: app.app_biz_id } })
+  router.push({
+    name: 'conversations',
+    query: { app_biz_id: app.app_biz_id, app_name: app.name },
+  })
+}
+
+// 将当前（过滤后）空间下的应用扁平化为清单，供导出
+const exportableApps = computed(() =>
+  filteredSpaces.value.flatMap((s) =>
+    s.apps.map((a) => ({
+      space_name: s.space_name,
+      space_id: s.space_id,
+      app_name: a.name,
+      app_biz_id: a.app_biz_id || '',
+      status: a.status,
+    })),
+  ),
+)
+
+function csvEscape(v: string): string {
+  const s = (v ?? '').toString()
+  if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"'
+  return s
+}
+
+function fileStamp(): string {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(
+    d.getMinutes(),
+  )}${p(d.getSeconds())}`
+}
+
+function onExportApps() {
+  const head = ['空间名称', '空间ID', '应用名称', '应用ID', '状态']
+  const rows = exportableApps.value.map((r) => [
+    r.space_name,
+    r.space_id,
+    r.app_name,
+    r.app_biz_id,
+    r.status,
+  ])
+  const csv = '\uFEFF' + [head, ...rows].map((row) => row.map(csvEscape).join(',')).join('\n')
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `apps_${projectId.value}_${fileStamp()}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 async function load() {
@@ -231,8 +287,8 @@ async function load() {
 }
 
 onMounted(async () => {
-  // 确保有最新的可见项目
-  if (!auth.user) await auth.fetchMe()
+  // 每次进入看板都刷新可见项目，确保新建/变更的项目即时出现在下拉中
+  await auth.fetchMe()
   projects.value = auth.visibleProjects
   // 优先使用上次选中的项目
   const stored = projectStore.currentProjectId
@@ -310,6 +366,12 @@ onMounted(async () => {
 .block {
   margin-bottom: 18px;
   border-radius: 12px;
+}
+.inventory-extra {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 .apps-wrap {
   padding: 8px 4px;

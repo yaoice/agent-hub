@@ -89,7 +89,8 @@ def mock_conversations(app_biz_id: str, app_name: str = "", count: int = 5) -> l
                 user_nickname=f"访客{(base + i) % 100:02d}",
                 question=q,
                 answer=a,
-                intent_category=app_name or "通用咨询",
+                intent=f"{app_name or '智能助手'} v1.0-生产",
+                intent_category=("工作流", "文档问答", "通用咨询")[i % 3],
                 create_time=f"2026-06-21 10:{minute:02d}:00",
                 raw={"mock": True},
             )

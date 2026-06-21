@@ -168,13 +168,6 @@
             <span class="sync-desc">{{ opt.desc }}</span>
           </a-checkbox>
         </a-checkbox-group>
-        <template v-if="syncScopes.includes('conversations')">
-          <a-divider style="margin: 12px 0" />
-          <a-checkbox v-model:checked="syncFull">
-            全量回补
-            <span class="sync-desc">忽略增量水位，按时间范围全量拉取（首次/补数据用）</span>
-          </a-checkbox>
-        </template>
       </a-modal>
     </div>
   </a-spin>
@@ -192,17 +185,15 @@ const loading = ref(false)
 const saving = ref(false)
 const syncingId = ref<number | null>(null)
 
-// 同步范围选择
+// 同步范围选择（对话记录同步已独立到「对话记录」页）
 const scopeOptions: { label: string; value: SyncScope; desc: string }[] = [
   { label: '应用数量', value: 'app_count', desc: '空间/应用盘点' },
-  { label: '应用对话记录', value: 'conversations', desc: '遍历应用拉取对话' },
   { label: 'token消耗', value: 'token', desc: 'Token 消耗排行' },
 ]
 const syncVisible = ref(false)
 const syncing = ref(false)
 const syncTarget = ref<Project | null>(null)
 const syncScopes = ref<SyncScope[]>([])
-const syncFull = ref(false)
 const checkAll = computed(() => syncScopes.value.length === scopeOptions.length)
 const indeterminate = computed(
   () => syncScopes.value.length > 0 && syncScopes.value.length < scopeOptions.length,
@@ -340,10 +331,10 @@ async function remove(row: Project) {
   }
 }
 
-async function sync(row: Project, scopes: SyncScope[], full: boolean) {
+async function sync(row: Project, scopes: SyncScope[]) {
   syncingId.value = row.id
   try {
-    const res = await projectApi.sync(row.id, { scopes, full })
+    const res = await projectApi.sync(row.id, { scopes })
     Modal[res.ok ? 'success' : 'warning']({
       title: res.ok ? '同步成功' : '同步提示',
       content: res.message,
@@ -360,7 +351,6 @@ function openSyncDialog(row: Project) {
   syncTarget.value = row
   // 默认全选
   syncScopes.value = scopeOptions.map((o) => o.value)
-  syncFull.value = false
   syncVisible.value = true
 }
 
@@ -372,7 +362,7 @@ async function confirmSync() {
   if (!syncTarget.value || !syncScopes.value.length) return
   syncing.value = true
   try {
-    await sync(syncTarget.value, [...syncScopes.value], syncFull.value)
+    await sync(syncTarget.value, [...syncScopes.value])
     syncVisible.value = false
   } finally {
     syncing.value = false

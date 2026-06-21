@@ -149,8 +149,8 @@ class ConversationRepository(abc.ABC):
     ) -> int: ...
 
     @abc.abstractmethod
-    def list_app_ids(self, project_id: int) -> list[str]:
-        """返回该项目有对话记录的 app_biz_id 去重列表（供过滤下拉）。"""
+    def list_app_options(self, project_id: int) -> list[tuple[str, str]]:
+        """返回该项目有对话记录的 (app_biz_id, app_name) 去重列表（供过滤下拉）。"""
 
     @abc.abstractmethod
     def trend_by_day(
@@ -218,3 +218,22 @@ class SyncJobRepository(abc.ABC):
 
     @abc.abstractmethod
     def mark_failed(self, job_id: int, error: str) -> None: ...
+
+    @abc.abstractmethod
+    def request_cancel(self, project_id: int, job_id: int) -> bool:
+        """请求终止任务：仅当任务处于 pending/running 时置为 cancelling，返回是否成功。"""
+
+    @abc.abstractmethod
+    def is_cancelling(self, job_id: int) -> bool:
+        """实时读取任务是否已被请求终止（供后台任务协作式检查）。"""
+
+    @abc.abstractmethod
+    def mark_cancelled(self, job_id: int, message: str) -> None:
+        """将任务标记为已终止（cancelled）。"""
+
+    @abc.abstractmethod
+    def fail_active_jobs(self, error: str) -> int:
+        """把所有 pending/running/cancelling 的任务标记为失败，返回处理条数。
+
+        用于服务启动时清理上次进程残留的“僵尸任务”（进程重启后后台任务已不存在）。
+        """

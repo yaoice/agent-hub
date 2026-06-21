@@ -3,8 +3,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .logging_conf import setup_logging
 from .routers import auth, dashboard, projects, providers, users
 from .seed import init_db
+
+# 尽早初始化日志，确保启动阶段与各模块日志按 LOG_LEVEL 输出
+setup_logging()
 
 app = FastAPI(title="智能体运营中心看板 API", version="2.0.0")
 

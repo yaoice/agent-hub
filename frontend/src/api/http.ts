@@ -3,7 +3,8 @@ import { message } from 'ant-design-vue'
 
 const http = axios.create({
   baseURL: '/api',
-  timeout: 30000,
+  // 请求超时（毫秒），可经 VITE_API_TIMEOUT 配置，默认 60s
+  timeout: Number(import.meta.env.VITE_API_TIMEOUT) || 60000,
 })
 
 // 请求拦截：注入 Token
@@ -21,7 +22,9 @@ http.interceptors.response.use(
   (error) => {
     const status = error.response?.status
     const detail = error.response?.data?.detail
-    if (status === 401) {
+    // 登录请求的 401 是「账号/密码错误」，不应按「登录过期」处理，更不能跳转
+    const isLoginRequest = (error.config?.url || '').includes('/auth/login')
+    if (status === 401 && !isLoginRequest) {
       localStorage.removeItem('token')
       if (location.hash !== '#/login') {
         location.hash = '#/login'

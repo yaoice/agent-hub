@@ -30,14 +30,15 @@ def sync_dashboard(metric_repo: MetricRepository, project: Project, scopes: set[
     """按 scope 局部同步看板数据。
 
     仅拉取被请求 scope（app_count / token）对应的部分，与项目最新快照合并后
-    追加一条新快照，保证看板数据始终完整。返回 (snapshot, source)。
+    追加一条新快照，保证看板数据始终完整。返回 (snapshot, source, errors)。
+    errors 为回退 Mock 的原因列表，便于向用户清晰反馈同步成败。
     """
     scopes = {s for s in scopes if s in DASHBOARD_SCOPES}
     if not scopes:
-        return None, "live"
+        return None, "live", []
 
     force_mock = not project.is_active
-    parts, source = fetch_dashboard_parts(project, scopes, force_mock=force_mock)
+    parts, source, errors = fetch_dashboard_parts(project, scopes, force_mock=force_mock)
 
     # 以最新快照为基底，仅覆盖本次拉取的部分（未选部分沿用历史）
     latest = metric_repo.get_latest(project.id, METRIC_TYPE)
@@ -47,4 +48,4 @@ def sync_dashboard(metric_repo: MetricRepository, project: Project, scopes: set[
     snapshot = metric_repo.add_snapshot(
         project.id, METRIC_TYPE, json.dumps(base, ensure_ascii=False), source
     )
-    return snapshot, source
+    return snapshot, source, errors

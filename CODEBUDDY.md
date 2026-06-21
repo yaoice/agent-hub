@@ -32,6 +32,7 @@ agent-hub/
 ├── backend/                    # 后端服务（FastAPI）
 │   ├── app/
 │   │   ├── main.py             # 入口：挂载路由 + startup 时 init_db()
+│   │   ├── logging_conf.py     # 统一日志初始化（按 LOG_LEVEL 配置 app.* logger）
 │   │   ├── config.py           # Settings（env-only），get_settings() 缓存单例
 │   │   ├── database.py         # engine / SessionLocal / Base / get_db()
 │   │   ├── models.py           # ORM 模型（全部数据表定义）
@@ -137,9 +138,10 @@ DATABASE_URL=mysql+pymysql://user:password@127.0.0.1:3306/agent_hub?charset=utf8
 
 ### 4.2 项目与同步（核心）
 - 项目持有加密凭证与成员；同步分两类：
-  - **看板同步**（`sync.py` + `normalize.py`）：按 scope（`app_count` / `token`）局部拉取，与最新快照合并后追加新 `MetricSnapshot`。
-  - **对话同步**（`conversations.py`）：遍历项目下所有应用拉取 `DescribeMsgLogList`，按 `record_id` 项目级去重入库；默认增量，受最小间隔限频（429）。
-- **异步任务**（`sync_jobs.py` + `SyncJob` 表）：后台执行写回进度，前端轮询。
+  - **看板同步**（`sync.py` + `normalize.py`）：经 `/sync` 端点，按 scope（`app_count` / `token`）局部拉取，与最新快照合并后追加新 `MetricSnapshot`；回退 Mock 时返回 `errors` 说明具体原因。
+  - **对话同步**（`conversations.py`）：已从 `/sync` 独立到「对话记录」页，遍历项目下所有应用拉取 `DescribeMsgLogList`，按 `record_id` 项目级去重入库（同时落库 `app_name` / `intent`）；默认增量、默认最近 30 天，受最小间隔限频（429）。
+- **异步任务**（`sync_jobs.py` + `SyncJob` 表）：对话同步后台执行写回进度，前端轮询；支持**协作式终止**（`/cancel` → `cancelling` → `cancelled`，已拉取部分保留入库）；服务启动时清理上次进程残留的「僵尸任务」（`fail_active_jobs`）。
+- **Host 归一化**：Provider 基类用 `normalize_host` 兼容带/不带协议与端口的 host 写法。
 - **Mock 回退**：无有效凭证或调用异常时回退 `mock.py`，`source` 标记为 `mock`。
 
 ### 4.3 看板与对话查询
@@ -178,6 +180,7 @@ DATABASE_URL=mysql+pymysql://user:password@127.0.0.1:3306/agent_hub?charset=utf8
   - 凭证落库必须 Fernet 加密，返回必须 `mask_secret` 脱敏。
   - 反序列化使用安全方式；不信任外部输入。
 - **异常与回退**：Provider 调用失败应捕获并回退 Mock，保证看板始终可用；不要让单个应用失败影响整体同步。
+- **日志**：统一用 `logging.getLogger(__name__)`（模块名以 `app.` 开头，由 `logging_conf` 配置），按 `LOG_LEVEL` 输出；不要用 `print`。回退 Mock、任务失败/终止等关键路径应记录可排障的日志。
 
 ### 5.3 前端
 - API 调用统一经 `api/` 封装，不在组件内直接 `axios`。
@@ -227,7 +230,9 @@ DATABASE_URL=mysql+pymysql://user:password@127.0.0.1:3306/agent_hub?charset=utf8
 | 前端端口 | `5173`，`/api` 代理到 `8011` |
 | 默认管理员 | `admin / admin`（仅首次初始化） |
 | 数据来源标记 | `source`：`live`（真实）/ `mock`（回退） |
-| 同步范围 | `app_count` / `token` / `conversations` |
+| 看板同步范围 | `app_count` / `token`（对话同步已独立到「对话记录」页） |
+| 对话同步 | 异步任务，默认增量、默认最近 30 天，支持终止（`cancelling`/`cancelled`） |
+| 日志 | `LOG_LEVEL`（默认 `INFO`）/ `PROVIDER_DEBUG`，统一经 `logging_conf.setup_logging()` |
 | 全局角色 | `admin` / `user` |
 | 项目角色 | `project_admin` / `member` |
 | 密钥处理 | Fernet 加密落库 + 返回脱敏 |

@@ -10,6 +10,7 @@ from .config import settings
 from .database import Base, SessionLocal, engine
 from .models import Project, Provider, ProjectMember, User
 from .providers.registry import BUILTIN_PROVIDERS
+from .repositories import get_sync_job_repository
 from .security import encrypt_secret, hash_password
 
 
@@ -27,6 +28,19 @@ def _ensure_schema() -> None:
             conn.execute(
                 text("ALTER TABLE projects ADD COLUMN last_conv_synced_at DATETIME")
             )
+
+    # 对话记录表：补充 app_name / intent 列（旧库兼容）
+    if "conversation_records" in inspector.get_table_names():
+        conv_cols = {col["name"] for col in inspector.get_columns("conversation_records")}
+        with engine.begin() as conn:
+            if "app_name" not in conv_cols:
+                conn.execute(
+                    text("ALTER TABLE conversation_records ADD COLUMN app_name VARCHAR(256) DEFAULT ''")
+                )
+            if "intent" not in conv_cols:
+                conn.execute(
+                    text("ALTER TABLE conversation_records ADD COLUMN intent VARCHAR(256) DEFAULT ''")
+                )
 
 
 def _seed_providers(db: Session) -> None:
@@ -91,5 +105,13 @@ def init_db() -> None:
                 )
             )
             db.commit()
+
+        # 清理上次进程残留的“僵尸”同步任务：进程重启后后台任务已不存在，
+        # 仍处于 pending/running/cancelling 的任务永远不会结束，会阻塞后续同步并卡死前端进度。
+        n = get_sync_job_repository(db).fail_active_jobs("服务重启，任务已中断")
+        if n:
+            import logging
+
+            logging.getLogger("app.seed").warning("启动清理 %s 个残留同步任务", n)
     finally:
         db.close()

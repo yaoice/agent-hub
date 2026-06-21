@@ -7,6 +7,31 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
+
+
+def normalize_host(raw: str) -> tuple[str, str]:
+    """将用户输入的 host 归一化为 (scheme, netloc)。
+
+    兼容多种写法，使填写时可带或不带协议：
+      - "https://xxx.com.cn"      -> ("https", "xxx.com.cn")
+      - "http://host:8080/path"   -> ("http", "host:8080")
+      - "xxx.com.cn"              -> ("https", "xxx.com.cn")  # 缺省按 https
+      - "host:8080"               -> ("https", "host:8080")
+
+    netloc（含端口）用于 Host 头与签名计算，scheme 用于拼接请求 URL。
+    """
+    raw = (raw or "").strip()
+    if "://" in raw:
+        parsed = urlparse(raw)
+        scheme = (parsed.scheme or "https").lower()
+        netloc = parsed.netloc or parsed.path
+    else:
+        scheme = "https"
+        netloc = raw
+    # 去掉可能误带的路径与首尾斜杠，仅保留 host[:port]
+    netloc = netloc.strip().strip("/").split("/")[0]
+    return scheme, netloc
 
 
 @dataclass
@@ -40,6 +65,7 @@ class ConversationItem:
     user_nickname: str = ""
     question: str = ""
     answer: str = ""
+    intent: str = ""
     intent_category: str = ""
     create_time: str = ""
     raw: dict = field(default_factory=dict)
@@ -58,7 +84,9 @@ class BaseProvider(abc.ABC):
     def __init__(self, secret_id: str, secret_key: str, host: str, region: str = "1"):
         self.secret_id = secret_id
         self.secret_key = secret_key
-        self.host = host
+        # 归一化 host：支持用户填写带协议的地址（https://xxx.com.cn）
+        # self.host 为 host[:port]（用于 Host 头与签名），self.scheme 用于拼接 URL
+        self.scheme, self.host = normalize_host(host)
         self.region = region
 
     @abc.abstractmethod

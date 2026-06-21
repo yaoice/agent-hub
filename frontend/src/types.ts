@@ -100,14 +100,10 @@ export interface ProjectMember {
   created_at: string
 }
 
-export type SyncScope = 'app_count' | 'token' | 'conversations'
+export type SyncScope = 'app_count' | 'token'
 
 export interface SyncPayload {
   scopes?: SyncScope[]
-  conv_begin?: string
-  conv_end?: string
-  max_records_per_app?: number
-  full?: boolean
 }
 
 export interface SyncResult {
@@ -123,14 +119,21 @@ export interface SyncResult {
 export interface ConversationItem {
   id: number
   app_biz_id: string
+  app_name: string
   session_id: string
   user_biz_id: string
   user_nickname: string
   question: string
   answer: string
+  intent: string
   intent_category: string
   create_time: string
   synced_at: string
+}
+
+export interface ConversationAppOption {
+  app_biz_id: string
+  app_name: string
 }
 
 export interface ConversationPage {
@@ -164,7 +167,13 @@ export interface ConversationSyncPayload {
   full?: boolean
 }
 
-export type SyncJobStatus = 'pending' | 'running' | 'success' | 'failed'
+export type SyncJobStatus =
+  | 'pending'
+  | 'running'
+  | 'cancelling'
+  | 'success'
+  | 'failed'
+  | 'cancelled'
 
 export interface SyncJob {
   id: number

@@ -24,6 +24,7 @@ from ..repositories import (
     get_user_repository,
 )
 from ..schemas import (
+    ConversationAppOption,
     ConversationPage,
     ConversationStats,
     ConversationSyncRequest,
@@ -232,12 +233,11 @@ def remove_member(
 
 
 # ---------------- 手动同步（按范围 scope） ----------------
-SCOPE_CONVERSATIONS = "conversations"
-VALID_SYNC_SCOPES = {SCOPE_APP_COUNT, SCOPE_TOKEN, SCOPE_CONVERSATIONS}
+# 注：对话记录同步已独立到「对话记录」页（异步任务），不在本接口范围内。
+VALID_SYNC_SCOPES = {SCOPE_APP_COUNT, SCOPE_TOKEN}
 SCOPE_LABELS = {
     SCOPE_APP_COUNT: "应用数量",
     SCOPE_TOKEN: "token消耗",
-    SCOPE_CONVERSATIONS: "应用对话记录",
 }
 
 
@@ -247,9 +247,10 @@ def sync(
     project: Project = Depends(require_project_admin),
     db: Session = Depends(get_db),
 ):
-    """按用户选择的范围同步数据。
+    """按用户选择的范围同步看板数据。
 
-    scopes 为 app_count / token / conversations 的子集；留空默认 [app_count, token]。
+    scopes 为 app_count / token 的子集；留空默认 [app_count, token]。
+    对话记录同步请使用「对话记录」页（独立的异步任务接口）。
     """
     scopes = body.scopes if body.scopes is not None else [SCOPE_APP_COUNT, SCOPE_TOKEN]
     scopes = list(dict.fromkeys(scopes))  # 去重保序
@@ -262,43 +263,32 @@ def sync(
     sources: list[str] = []
     details: dict = {}
     msg_parts: list[str] = []
+    fallback_reasons: list[str] = []
 
     # 看板部分（应用数量 / token 消耗）
     dashboard_scopes = {s for s in scopes if s in (SCOPE_APP_COUNT, SCOPE_TOKEN)}
     if dashboard_scopes:
-        _, src = sync_dashboard(get_metric_repository(db), project, dashboard_scopes)
+        _, src, errs = sync_dashboard(get_metric_repository(db), project, dashboard_scopes)
         sources.append(src)
-        details["dashboard"] = {"scopes": sorted(dashboard_scopes), "source": src}
+        details["dashboard"] = {
+            "scopes": sorted(dashboard_scopes),
+            "source": src,
+            "errors": errs,
+        }
         labels = "、".join(SCOPE_LABELS[s] for s in scopes if s in dashboard_scopes)
-        msg_parts.append(f"{labels} 已同步")
-
-    # 对话记录部分
-    if SCOPE_CONVERSATIONS in scopes:
-        _guard_conv_sync_rate(project)
-        now = datetime.now()
-        begin = body.conv_begin or (now - timedelta(days=7)).strftime("%Y-%m-%d 00:00:00")
-        end = body.conv_end or now.strftime("%Y-%m-%d %H:%M:%S")
-        conv = sync_conversations(
-            get_conversation_repository(db),
-            project,
-            begin=begin,
-            end=end,
-            max_records_per_app=body.max_records_per_app,
-            incremental=not body.full,
-        )
-        get_project_repository(db).save(project)  # 持久化同步水位时间
-        sources.append(conv["source"])
-        details["conversations"] = conv
-        mode = "全量" if body.full else "增量"
-        msg_parts.append(
-            f"应用对话记录（{mode}）：{conv['app_count']} 个应用拉取 {conv['fetched']} 条，"
-            f"新增 {conv['inserted']} 条"
-        )
+        if src == "live":
+            msg_parts.append(f"{labels} 已同步（实时数据）")
+        else:
+            msg_parts.append(f"{labels} 同步未取到实时数据，已回退 Mock 演示数据")
+        fallback_reasons.extend(errs)
 
     overall_source = "live" if sources and all(s == "live" for s in sources) else "mock"
     message = "；".join(msg_parts)
-    if overall_source == "mock":
-        message += "（部分或全部为 Mock 演示数据）"
+    if overall_source == "mock" and fallback_reasons:
+        # 去重保序，向用户清晰说明回退到 Mock 的具体原因
+        seen: set[str] = set()
+        uniq = [r for r in fallback_reasons if not (r in seen or seen.add(r))]
+        message += "。回退原因：" + "；".join(uniq)
 
     return SyncResult(
         ok=overall_source == "live",
@@ -324,7 +314,7 @@ def sync_conversation_records(
     """
     _guard_conv_sync_rate(project)
     now = datetime.now()
-    begin = body.begin or (now - timedelta(days=7)).strftime("%Y-%m-%d 00:00:00")
+    begin = body.begin or (now - timedelta(days=30)).strftime("%Y-%m-%d 00:00:00")
     end = body.end or now.strftime("%Y-%m-%d %H:%M:%S")
 
     result = sync_conversations(
@@ -377,7 +367,7 @@ def start_conversation_sync_job(
             detail="已有进行中的对话同步任务，请等待其完成后再试",
         )
     now = datetime.now()
-    begin = body.begin or (now - timedelta(days=7)).strftime("%Y-%m-%d 00:00:00")
+    begin = body.begin or (now - timedelta(days=30)).strftime("%Y-%m-%d 00:00:00")
     end = body.end or now.strftime("%Y-%m-%d %H:%M:%S")
     incremental = not body.full
     job = job_repo.create(project.id, CONV_JOB_SCOPE, incremental)
@@ -417,6 +407,24 @@ def get_conversation_sync_job(
     return job
 
 
+@router.post(
+    "/{project_id}/conversation-sync-jobs/{job_id}/cancel", response_model=SyncJobOut
+)
+def cancel_conversation_sync_job(
+    job_id: int,
+    project: Project = Depends(require_project_admin),
+    db: Session = Depends(get_db),
+):
+    """请求终止一个进行中的对话同步任务（协作式：后台任务在处理下一个应用前停止）。"""
+    repo = get_sync_job_repository(db)
+    job = repo.get_for_project(project.id, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="同步任务不存在")
+    if not repo.request_cancel(project.id, job_id):
+        raise HTTPException(status_code=409, detail="任务已结束，无法终止")
+    return repo.get_for_project(project.id, job_id)
+
+
 @router.get("/{project_id}/conversations", response_model=ConversationPage)
 def list_conversations(
     app_biz_id: str | None = Query(default=None),
@@ -447,13 +455,14 @@ def list_conversations(
     return ConversationPage(total=total, items=items)
 
 
-@router.get("/{project_id}/conversation-apps", response_model=list[str])
+@router.get("/{project_id}/conversation-apps", response_model=list[ConversationAppOption])
 def list_conversation_apps(
     project: Project = Depends(require_project_access),
     db: Session = Depends(get_db),
 ):
-    """返回该项目有对话记录的 app_biz_id 去重列表（供前端过滤下拉）。"""
-    return get_conversation_repository(db).list_app_ids(project.id)
+    """返回该项目有对话记录的应用列表（app_biz_id + 应用名称），供前端过滤下拉。"""
+    options = get_conversation_repository(db).list_app_options(project.id)
+    return [ConversationAppOption(app_biz_id=aid, app_name=name) for aid, name in options]
 
 
 @router.get("/{project_id}/conversation-stats", response_model=ConversationStats)
