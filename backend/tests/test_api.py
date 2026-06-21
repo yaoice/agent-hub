@@ -195,6 +195,46 @@ def test_sync_conversations_and_dedup(client):
         assert "question" in row and "answer" in row and "app_biz_id" in row
 
 
+def test_conversation_stats(client):
+    token = login(client, "admin", "admin")
+    h = auth_headers(token)
+    pid = _create_mock_project(client, h, name="统计项目")
+
+    # 未同步：趋势与意图均为空，total=0
+    empty = client.get(f"/api/projects/{pid}/conversation-stats", headers=h).json()
+    assert empty["total"] == 0
+    assert empty["trend"] == [] and empty["intents"] == []
+
+    client.post(f"/api/projects/{pid}/sync-conversations", json={}, headers=h)
+
+    stats = client.get(f"/api/projects/{pid}/conversation-stats", headers=h).json()
+    # total 与列表总数一致
+    page = client.get(f"/api/projects/{pid}/conversations?limit=1", headers=h).json()
+    assert stats["total"] == page["total"]
+    # 趋势按天求和 == total
+    assert sum(p["count"] for p in stats["trend"]) == stats["total"]
+    # 意图分布求和 == total，且每项有 name/count
+    assert sum(i["count"] for i in stats["intents"]) == stats["total"]
+    assert all("name" in i and "count" in i for i in stats["intents"])
+    # 意图降序
+    counts = [i["count"] for i in stats["intents"]]
+    assert counts == sorted(counts, reverse=True)
+
+    # 关键词注入安全 + 远未来时间段为空
+    injected = client.get(
+        f"/api/projects/{pid}/conversation-stats",
+        params={"keyword": "%' OR '1'='1"},
+        headers=h,
+    )
+    assert injected.status_code == 200
+    future = client.get(
+        f"/api/projects/{pid}/conversation-stats",
+        params={"begin": "2999-01-01 00:00:00"},
+        headers=h,
+    ).json()
+    assert future["total"] == 0
+
+
 def test_conversation_filters_and_apps(client):
     token = login(client, "admin", "admin")
     h = auth_headers(token)
@@ -259,6 +299,8 @@ def test_sync_conversations_requires_project_admin(client):
     assert ok.status_code == 200
     ok_apps = client.get(f"/api/projects/{pid}/conversation-apps", headers=bob_h)
     assert ok_apps.status_code == 200
+    ok_stats = client.get(f"/api/projects/{pid}/conversation-stats", headers=bob_h)
+    assert ok_stats.status_code == 200
 
 
 def test_sync_scopes_selective(client):

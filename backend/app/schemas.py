@@ -216,6 +216,22 @@ class ConversationPage(BaseModel):
     items: list[ConversationOut]
 
 
+class TrendPoint(BaseModel):
+    date: str
+    count: int
+
+
+class IntentSlice(BaseModel):
+    name: str
+    count: int
+
+
+class ConversationStats(BaseModel):
+    trend: list[TrendPoint]
+    intents: list[IntentSlice]
+    total: int
+
+
 # ---------- Dashboard ----------
 class DashboardResponse(BaseModel):
     project_id: int

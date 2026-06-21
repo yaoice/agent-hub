@@ -73,6 +73,18 @@
         </div>
       </a-card>
 
+      <!-- 统计图表（默认收起，懒加载，随筛选联动） -->
+      <a-collapse v-model:activeKey="statsActiveKey" :bordered="false" class="block stats-collapse">
+        <a-collapse-panel key="stats" header="统计图表">
+          <ConversationStatsPanel
+            ref="statsPanelRef"
+            :project-id="projectId"
+            :query="statsQuery"
+            :active="statsActiveKey.includes('stats')"
+          />
+        </a-collapse-panel>
+      </a-collapse>
+
       <!-- 对话列表 -->
       <a-card :bordered="false" class="block">
         <a-table
@@ -151,6 +163,7 @@ import {
 } from '@ant-design/icons-vue'
 import { conversationApi } from '@/api'
 import type { ConversationItem, ConversationQuery, ProjectBrief } from '@/types'
+import ConversationStatsPanel from '@/components/ConversationStatsPanel.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectStore } from '@/stores/project'
 
@@ -177,6 +190,23 @@ const filters = reactive({
   keyword: undefined as string | undefined,
 })
 const page = reactive({ current: 1, pageSize: 50 })
+
+// 统计图表面板：默认收起，懒加载
+const statsActiveKey = ref<string[]>([])
+const statsPanelRef = ref<{ reload: () => void } | null>(null)
+
+// 统计用的过滤条件（不含分页），供图表面板联动
+const statsQuery = computed<ConversationQuery>(() => {
+  const q: ConversationQuery = {}
+  if (filters.app_biz_id) q.app_biz_id = filters.app_biz_id
+  if (filters.intent) q.intent = filters.intent.trim()
+  if (filters.keyword) q.keyword = filters.keyword.trim()
+  if (dateRange.value) {
+    q.begin = dateRange.value[0].format('YYYY-MM-DD HH:mm:ss')
+    q.end = dateRange.value[1].format('YYYY-MM-DD HH:mm:ss')
+  }
+  return q
+})
 
 // 全局 admin 或当前项目的 project_admin 可同步/导出
 const canManage = computed(() => {
@@ -256,6 +286,7 @@ async function loadApps() {
 
 function reload() {
   load()
+  if (statsActiveKey.value.includes('stats')) statsPanelRef.value?.reload()
 }
 
 function onFilterChange() {

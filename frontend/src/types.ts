@@ -156,6 +156,22 @@ export interface ConversationSyncResult {
   synced_at: string
 }
 
+export interface TrendPoint {
+  date: string
+  count: number
+}
+
+export interface IntentSlice {
+  name: string
+  count: number
+}
+
+export interface ConversationStats {
+  trend: TrendPoint[]
+  intents: IntentSlice[]
+  total: number
+}
+
 // ---------- 看板 ----------
 export interface AppEntry {
   name: string

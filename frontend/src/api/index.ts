@@ -2,6 +2,7 @@ import http from './http'
 import type {
   ConversationPage,
   ConversationQuery,
+  ConversationStats,
   ConversationSyncResult,
   DashboardResponse,
   LoginResponse,
@@ -112,6 +113,11 @@ export const conversationApi = {
   apps(projectId: number) {
     return http
       .get<string[]>(`/projects/${projectId}/conversation-apps`)
+      .then((r) => r.data)
+  },
+  stats(projectId: number, query: ConversationQuery = {}) {
+    return http
+      .get<ConversationStats>(`/projects/${projectId}/conversation-stats`, { params: query })
       .then((r) => r.data)
   },
   sync(projectId: number, payload?: { begin?: string; end?: string; max_records_per_app?: number }) {

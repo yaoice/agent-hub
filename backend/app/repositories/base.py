@@ -144,3 +144,27 @@ class ConversationRepository(abc.ABC):
     @abc.abstractmethod
     def list_app_ids(self, project_id: int) -> list[str]:
         """返回该项目有对话记录的 app_biz_id 去重列表（供过滤下拉）。"""
+
+    @abc.abstractmethod
+    def trend_by_day(
+        self,
+        project_id: int,
+        app_biz_id: Optional[str] = None,
+        begin: Optional[str] = None,
+        end: Optional[str] = None,
+        keyword: Optional[str] = None,
+        intent: Optional[str] = None,
+    ) -> list[tuple[str, int]]:
+        """按天聚合对话量，返回 [(date, count)]，按日期升序。"""
+
+    @abc.abstractmethod
+    def intent_distribution(
+        self,
+        project_id: int,
+        app_biz_id: Optional[str] = None,
+        begin: Optional[str] = None,
+        end: Optional[str] = None,
+        keyword: Optional[str] = None,
+        intent: Optional[str] = None,
+    ) -> list[tuple[str, int]]:
+        """按意图分类聚合，返回 [(intent, count)]，按 count 降序。"""

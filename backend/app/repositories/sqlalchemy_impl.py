@@ -303,3 +303,43 @@ class SqlAlchemyConversationRepository(base.ConversationRepository):
             .order_by(models.ConversationRecord.app_biz_id)
         ).all()
         return [r for r in rows if r]
+
+    def trend_by_day(
+        self,
+        project_id: int,
+        app_biz_id: Optional[str] = None,
+        begin: Optional[str] = None,
+        end: Optional[str] = None,
+        keyword: Optional[str] = None,
+        intent: Optional[str] = None,
+    ) -> list[tuple[str, int]]:
+        C = models.ConversationRecord
+        # msg_create_time 为 "YYYY-MM-DD HH:MM:SS"，截前 10 位即日期（SQLite/MySQL 通用 substr）
+        day = func.substr(C.msg_create_time, 1, 10)
+        stmt = (
+            select(day.label("day"), func.count().label("cnt"))
+            .where(C.project_id == project_id, C.msg_create_time != "")
+        )
+        stmt = self._apply_filters(stmt, app_biz_id, begin, end, keyword, intent)
+        stmt = stmt.group_by(day).order_by(day.asc())
+        return [(row.day, int(row.cnt)) for row in self.db.execute(stmt).all()]
+
+    def intent_distribution(
+        self,
+        project_id: int,
+        app_biz_id: Optional[str] = None,
+        begin: Optional[str] = None,
+        end: Optional[str] = None,
+        keyword: Optional[str] = None,
+        intent: Optional[str] = None,
+    ) -> list[tuple[str, int]]:
+        C = models.ConversationRecord
+        stmt = select(C.intent_category.label("intent"), func.count().label("cnt")).where(
+            C.project_id == project_id
+        )
+        stmt = self._apply_filters(stmt, app_biz_id, begin, end, keyword, intent)
+        stmt = stmt.group_by(C.intent_category).order_by(func.count().desc())
+        return [
+            ((row.intent or "未分类"), int(row.cnt))
+            for row in self.db.execute(stmt).all()
+        ]

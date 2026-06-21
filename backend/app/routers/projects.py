@@ -23,8 +23,10 @@ from ..repositories import (
 )
 from ..schemas import (
     ConversationPage,
+    ConversationStats,
     ConversationSyncRequest,
     ConversationSyncResult,
+    IntentSlice,
     ProjectCreate,
     ProjectMemberCreate,
     ProjectMemberOut,
@@ -32,6 +34,7 @@ from ..schemas import (
     ProjectUpdate,
     SyncRequest,
     SyncResult,
+    TrendPoint,
 )
 from ..security import decrypt_secret, encrypt_secret, mask_secret
 from ..services import (
@@ -356,3 +359,25 @@ def list_conversation_apps(
 ):
     """返回该项目有对话记录的 app_biz_id 去重列表（供前端过滤下拉）。"""
     return get_conversation_repository(db).list_app_ids(project.id)
+
+
+@router.get("/{project_id}/conversation-stats", response_model=ConversationStats)
+def conversation_stats(
+    app_biz_id: str | None = Query(default=None),
+    begin: str | None = Query(default=None, description="起始时间 YYYY-MM-DD HH:MM:SS"),
+    end: str | None = Query(default=None, description="结束时间 YYYY-MM-DD HH:MM:SS"),
+    keyword: str | None = Query(default=None, description="搜索问题/回答"),
+    intent: str | None = Query(default=None, description="意图分类"),
+    project: Project = Depends(require_project_access),
+    db: Session = Depends(get_db),
+):
+    """对话记录统计：按天趋势 + 意图分布，过滤条件与列表一致。"""
+    repo = get_conversation_repository(db)
+    flt = dict(app_biz_id=app_biz_id, begin=begin, end=end, keyword=keyword, intent=intent)
+    trend = repo.trend_by_day(project.id, **flt)
+    intents = repo.intent_distribution(project.id, **flt)
+    return ConversationStats(
+        trend=[TrendPoint(date=d, count=c) for d, c in trend],
+        intents=[IntentSlice(name=n, count=c) for n, c in intents],
+        total=sum(c for _, c in trend),
+    )
